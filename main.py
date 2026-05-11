@@ -10,6 +10,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramBadRequest,
 )
+from aiogram.types import InputMediaPhoto
 
 import handlers
 from config import CHECK_INTERVAL, FIRST_RUN_LIMIT, TOKEN
@@ -32,14 +33,30 @@ log = logging.getLogger("kufar_bot")
 async def _send_ad(bot: Bot, chat_id: int, ad: dict) -> bool:
     """True если сообщение реально доставлено пользователю."""
     text = format_ad(ad)
-    try:
+    photos = [p for p in (ad.get("photo_urls") or []) if isinstance(p, str) and p.strip()]
+
+    async def _deliver() -> None:
+        if photos:
+            media = [
+                InputMediaPhoto(
+                    media=photo,
+                    caption=text if i == 0 else None,
+                    parse_mode=ParseMode.HTML if i == 0 else None,
+                )
+                for i, photo in enumerate(photos[:5])
+            ]
+            await bot.send_media_group(chat_id=chat_id, media=media)
+            return
         await bot.send_message(chat_id, text, disable_web_page_preview=False)
+
+    try:
+        await _deliver()
         return True
     except TelegramRetryAfter as e:
         log.warning("[SEND] flood control, sleep %ss", e.retry_after)
         await asyncio.sleep(e.retry_after + 1)
         try:
-            await bot.send_message(chat_id, text, disable_web_page_preview=False)
+            await _deliver()
             return True
         except Exception as exc:
             log.exception("[SEND] retry failed for %s: %s", chat_id, exc)

@@ -6,7 +6,7 @@ from typing import Optional
 
 import aiohttp
 
-from config import KUFAR_QUERY, KUFAR_REGION, KUFAR_SIZE
+from config import DEFAULT_EXCLUDE_TERMS, KUFAR_QUERY, KUFAR_REGION, KUFAR_SIZE
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,32 @@ NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>',
     re.DOTALL,
 )
+
+PHONE_REQUIRED_TERMS = (
+    "iphone",
+    "айфон",
+    "телефон",
+    "смартфон",
+    "mobile phone",
+)
+
+NOT_SALE_TERMS = (
+    "выкуп",
+    "скупка",
+    "скупаем",
+    "куплю",
+    "купим",
+    "покупаем",
+    "продать",
+    "обмен",
+    "обменяю",
+    "срочный выкуп",
+    "выезд",
+)
+
+
+def _norm(text: str) -> str:
+    return (text or "").lower().replace("ё", "е")
 
 
 def _param(params: list[dict], name: str) -> Optional[dict]:
@@ -97,6 +123,17 @@ def _normalize_ad(raw: dict) -> Optional[dict]:
     ad_params = raw.get("ad_parameters") or []
     location = _build_location(ad_params)
     summary = _build_summary(ad_params)
+    photos: list[str] = []
+    for image in raw.get("images") or []:
+        if not isinstance(image, dict):
+            continue
+        path = str(image.get("path") or "").strip().lstrip("/")
+        if not path:
+            continue
+        photos.append(f"https://rms.kufar.by/v1/gallery/{path}")
+
+    # Избегаем повторяющихся ссылок, сохраняя исходный порядок.
+    unique_photos = list(dict.fromkeys(photos))
 
     return {
         "ad_id": ad_id,
@@ -108,6 +145,7 @@ def _normalize_ad(raw: dict) -> Optional[dict]:
         "description": "",
         "link": link.split("?")[0],
         "list_time": raw.get("list_time"),
+        "photo_urls": unique_photos,
     }
 
 
@@ -195,16 +233,37 @@ def matches_filters(ad: dict, max_price: int, keywords: list[str]) -> bool:
         price = ad.get("price")
         if price is None or price > max_price:
             return False
+    else:
+        # Если ценовой лимит отключен, все равно отсекаем не-продажные объявления "0 р.".
+        price = ad.get("price")
+        if price is None or price <= 0:
+            return False
+
+    title = _norm(ad.get("title") or "")
+    summary = _norm(ad.get("summary") or "")
+    description = _norm(ad.get("description") or "")
+    haystack = " ".join([title, summary, description])
+    headline = " ".join([title, summary])
+    normalized_haystack = haystack
+
+    if not any(term in normalized_haystack for term in PHONE_REQUIRED_TERMS):
+        return False
+
+    if any(_norm(term) in normalized_haystack for term in NOT_SALE_TERMS):
+        return False
+
+    if any(_norm(term) in normalized_haystack for term in DEFAULT_EXCLUDE_TERMS):
+        return False
 
     if keywords:
-        haystack = " ".join(
-            [
-                ad.get("title", ""),
-                ad.get("summary", ""),
-                ad.get("description", ""),
-            ]
-        ).lower()
-        if not any(k.lower() in haystack for k in keywords):
+        normalized_keywords = [_norm(k).strip() for k in keywords if k.strip()]
+        if not normalized_keywords:
+            return False
+        # Приоритетно ищем совпадение в заголовке/параметрах, затем в полном тексте.
+        if not any(
+            keyword in headline or keyword in normalized_haystack
+            for keyword in normalized_keywords
+        ):
             return False
 
     return True
