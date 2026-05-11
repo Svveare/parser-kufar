@@ -25,7 +25,8 @@ from db import (
     set_active,
 )
 from formatter import format_ad
-from parser import fetch_ads, matches_filters
+from filters import matches_filters
+from kufar_fetch import fetch_ads
 
 log = logging.getLogger("kufar_bot")
 
