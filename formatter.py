@@ -1,4 +1,7 @@
 from html import escape
+from datetime import datetime, timezone
+
+from config import VIP_PRICE_USD
 
 
 def _esc(value) -> str:
@@ -7,7 +10,9 @@ def _esc(value) -> str:
     return escape(str(value))
 
 
-def format_ad(ad: dict) -> str:
+def format_ad(
+    ad: dict, *, market_avg_price: int | None = None, below_market: bool = False
+) -> str:
     """Превращает словарь объявления в HTML-сообщение для Telegram."""
     title = _esc(ad.get("title") or "Без названия")
 
@@ -28,6 +33,10 @@ def format_ad(ad: dict) -> str:
         f"📱 <b>{title}</b>",
         f"💰 <b>{_esc(price_str)}</b>",
     ]
+    if below_market:
+        parts.insert(0, "🔥 <b>НИЖЕ РЫНОЧНОЙ ЦЕНЫ</b>")
+    if market_avg_price is not None:
+        parts.append(f"📊 Средняя рыночная цена: <b>{market_avg_price} р.</b>")
     if location:
         parts.append(f"📍 <i>{location}</i>")
     if description:
@@ -45,9 +54,17 @@ def format_status(user: dict) -> str:
     kw = ", ".join(keywords) if keywords else "—"
     max_price = user.get("max_price") or 0
     sent = user.get("sent_count", 0)
+    role = "VIP ⭐" if user.get("role") == "vip" else "Обычный"
+    vip_until = int(user.get("vip_until") or 0)
+    vip_until_text = "—"
+    if vip_until > 0:
+        dt = datetime.fromtimestamp(vip_until, tz=timezone.utc).astimezone()
+        vip_until_text = dt.strftime("%d.%m.%Y %H:%M")
 
     return (
         f"<b>Статус подписки:</b> {active}\n"
+        f"<b>Тип пользователя:</b> {role}\n"
+        f"<b>VIP до:</b> {vip_until_text}\n"
         f"<b>Макс. цена:</b> {max_price} р.\n"
         f"<b>Ключевики:</b> {_esc(kw)}\n"
         f"<b>Прислано объявлений:</b> {sent}"
@@ -56,12 +73,10 @@ def format_status(user: dict) -> str:
 
 HELP_TEXT = (
     "<b>Kufar Support Bot</b>\n\n"
-    "Слежу за свежими объявлениями на Kufar и кидаю подходящие тебе сразу как появятся.\n\n"
-    "<b>Команды:</b>\n"
-    "/start — подписаться на рассылку\n"
-    "/stop — отписаться\n"
-    "/status — текущие настройки и статистика\n"
-    "/setprice 600 — поменять макс. цену\n"
-    "/setkeywords iphone 11, iphone 12 — поменять ключевики (через запятую)\n"
-    "/help — это сообщение"
+    "Слежу за свежими объявлениями на Kufar и присылаю подходящие варианты.\n\n"
+    "<b>Как пользоваться</b>\n"
+    "Всё делается кнопками в меню после <code>/start</code>:\n"
+    "статус, устройства, лимит цены, VIP, отписка — без ручного ввода команд.\n\n"
+    f"VIP: <b>{VIP_PRICE_USD}$</b> в месяц (по инструкции в разделе «VIP»).\n\n"
+    "Если меню пропало — снова нажми <code>/start</code>."
 )

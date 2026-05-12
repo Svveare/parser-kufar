@@ -13,8 +13,16 @@ from aiogram.exceptions import (
 from aiogram.types import InputMediaPhoto
 
 import handlers
-from config import CHECK_INTERVAL, FIRST_RUN_LIMIT, TOKEN
+from config import (
+    CHECK_INTERVAL,
+    FIRST_RUN_LIMIT,
+    MARKET_DISCOUNT_THRESHOLD,
+    REGULAR_CHECK_INTERVAL,
+    TOKEN,
+    VIP_CHECK_INTERVAL,
+)
 from db import (
+    avg_market_price,
     close as db_close,
     count_seen,
     get_active_users,
@@ -22,18 +30,27 @@ from db import (
     init_db,
     is_seen,
     mark_seen,
+    save_market_price,
     set_active,
 )
 from formatter import format_ad
-from filters import matches_filters
+from filters import ad_device_key, matches_filters
 from kufar_fetch import fetch_ads
 
 log = logging.getLogger("kufar_bot")
+last_run_at: dict[int, float] = {}
 
 
-async def _send_ad(bot: Bot, chat_id: int, ad: dict) -> bool:
+async def _send_ad(
+    bot: Bot,
+    chat_id: int,
+    ad: dict,
+    *,
+    market_avg_price: int | None = None,
+    below_market: bool = False,
+) -> bool:
     """True если сообщение реально доставлено пользователю."""
-    text = format_ad(ad)
+    text = format_ad(ad, market_avg_price=market_avg_price, below_market=below_market)
     photos = [p for p in (ad.get("photo_urls") or []) if isinstance(p, str) and p.strip()]
 
     async def _deliver() -> None:
@@ -76,7 +93,17 @@ async def _send_ad(bot: Bot, chat_id: int, ad: dict) -> bool:
 
 async def _process_user(bot: Bot, user: dict, ads: list[dict]) -> None:
     chat_id = user["chat_id"]
-    matched = [a for a in ads if matches_filters(a, user["max_price"], user["keywords"])]
+    is_vip = user.get("role") == "vip"
+    matched = [
+        a
+        for a in ads
+        if matches_filters(
+            a,
+            user["max_price"],
+            user["keywords"],
+            smart_filtering=is_vip,
+        )
+    ]
     if not matched:
         return
 
@@ -94,10 +121,31 @@ async def _process_user(bot: Bot, user: dict, ads: list[dict]) -> None:
     for ad in to_send:
         if is_seen(chat_id, ad["link"]):
             continue
-        ok = await _send_ad(bot, chat_id, ad)
+        market_avg = None
+        below_market = False
+        device_key = ad_device_key(ad)
+        price = ad.get("price")
+        if is_vip:
+            if device_key:
+                market_avg = avg_market_price(device_key)
+            if market_avg and price and price < int(market_avg * MARKET_DISCOUNT_THRESHOLD):
+                below_market = True
+        ok = await _send_ad(
+            bot,
+            chat_id,
+            ad,
+            market_avg_price=market_avg if is_vip else None,
+            below_market=below_market,
+        )
         mark_seen(chat_id, ad["link"])
         if ok:
             increment_sent(chat_id)
+            if (
+                device_key
+                and isinstance(price, int)
+                and price > 0
+            ):
+                save_market_price(ad["link"], device_key, price)
         await asyncio.sleep(0.05)
 
 
@@ -115,13 +163,26 @@ async def poller(bot: Bot) -> None:
 
                 for user in users:
                     try:
+                        if not _should_process_user(user):
+                            continue
                         await _process_user(bot, user, ads)
+                        last_run_at[user["chat_id"]] = asyncio.get_running_loop().time()
                     except Exception:
                         log.exception("[POLLER] ошибка обработки юзера %s", user["chat_id"])
         except Exception:
             log.exception("[POLLER] ошибка в цикле")
 
         await asyncio.sleep(CHECK_INTERVAL)
+
+
+def _should_process_user(user: dict) -> bool:
+    chat_id = user["chat_id"]
+    now = asyncio.get_running_loop().time()
+    prev = last_run_at.get(chat_id)
+    if prev is None:
+        return True
+    interval = VIP_CHECK_INTERVAL if user.get("role") == "vip" else REGULAR_CHECK_INTERVAL
+    return (now - prev) >= interval
 
 
 async def main() -> None:
