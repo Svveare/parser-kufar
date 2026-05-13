@@ -16,6 +16,7 @@ from aiogram.types import InputMediaPhoto
 import handlers
 from config import (
     CHECK_INTERVAL,
+    DB_PATH,
     FIRST_RUN_LIMIT,
     MARKET_DISCOUNT_THRESHOLD,
     REGULAR_CHECK_INTERVAL,
@@ -24,6 +25,7 @@ from config import (
     VIP_CHECK_INTERVAL,
 )
 from db import (
+    SQLITE_PATH,
     avg_market_price,
     close as db_close,
     count_seen,
@@ -44,6 +46,21 @@ log = logging.getLogger("kufar_bot")
 # Для VIP-режимов «все айфоны» — не ограничиваем ценой из профиля
 _VIP_SPECIAL_MAX_PRICE = 99_999_999
 last_run_at: dict[int, float] = {}
+
+
+def _ingest_market_prices_from_ads(ads: list[dict]) -> None:
+    """Пополняет market_prices из текущего батча листинга (один ответ API — одна база для средней)."""
+    for a in ads:
+        if not matches_filters(a, _VIP_SPECIAL_MAX_PRICE, [], smart_filtering=True):
+            continue
+        dk = ad_device_key(a)
+        price = a.get("price")
+        link = a.get("link")
+        if not dk or not isinstance(price, int) or price <= 0:
+            continue
+        if not isinstance(link, str) or not link.strip():
+            continue
+        save_market_price(link, dk, price)
 
 
 async def _send_ad(
@@ -202,6 +219,7 @@ async def poller(bot: Bot) -> None:
                 log.info("[POLLER] поиск объявлений для %d юзеров", len(users))
                 ads = await fetch_ads()
                 log.info("[POLLER] получено %d объявлений", len(ads))
+                _ingest_market_prices_from_ads(ads)
 
                 for user in users:
                     try:
@@ -240,6 +258,7 @@ async def main() -> None:
 
     init_db()
     log.info("[BOT] SQLite synchronous=%s (см. SQLITE_SYNCHRONOUS в .env)", SQLITE_SYNCHRONOUS)
+    log.info("[BOT] файл БД: %s (DB_PATH в .env: %s)", SQLITE_PATH, DB_PATH or "не задан")
 
     bot = Bot(
         token=TOKEN,

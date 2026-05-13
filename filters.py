@@ -13,6 +13,11 @@ EXCHANGE_NEGATIVE_TERMS: tuple[str, ...] = (
     "без обмена",
     "без обменов",
     "обмен не интересует",
+    "обмен не интересен",
+    "обмен не интересна",
+    "обмен не интересно",
+    "не интересен обмен",
+    "не интересна обмен",
     "обмен не нужен",
     "обмен не предлагать",
     "не на обмен",
@@ -21,8 +26,10 @@ EXCHANGE_NEGATIVE_TERMS: tuple[str, ...] = (
     "обмен не предлагаю",
 )
 
+# «обмен не …» — отсекает отказы («обмен не интересен», «обмен не рассматривается» и т.д.).
+EXCHANGE_REFUSAL_RE = re.compile(r"обмен\s+не(?:\s|$)")
+
 EXCHANGE_HINT_TERMS: tuple[str, ...] = (
-    "обмен",
     "меняю",
     "обменяю",
     "к обмену",
@@ -60,6 +67,13 @@ NEW_PHONE_TERMS: tuple[str, ...] = (
 
 def normalize(text: str) -> str:
     return (text or "").lower().replace("ё", "е")
+
+
+def normalize_for_exchange_match(text: str) -> str:
+    """Как normalize, плюс пунктуация → пробелы (чтобы «интересен.» матчился как «интересен»)."""
+    s = normalize(text)
+    s = re.sub(r"[.!?,;:…]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def ad_full_text(ad: dict) -> str:
@@ -146,7 +160,9 @@ def matches_filters(
 
 def is_exchange_ad(ad: dict) -> bool:
     """Объявление про обмен устройством (по формулировкам в тексте)."""
-    full_text = ad_full_text(ad)
+    full_text = normalize_for_exchange_match(ad_full_text(ad))
+    if EXCHANGE_REFUSAL_RE.search(full_text):
+        return False
     if any(normalize(t) in full_text for t in EXCHANGE_NEGATIVE_TERMS):
         return False
     return any(normalize(t) in full_text for t in EXCHANGE_HINT_TERMS)
