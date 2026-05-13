@@ -20,6 +20,7 @@ from db import (
     set_vip,
     update_keywords,
     update_max_price,
+    update_vip_feed_mode,
 )
 from formatter import HELP_TEXT, format_status
 
@@ -195,15 +196,23 @@ def _main_home_text(user: dict | None, *, is_new: bool) -> str:
         return "Нажми <code>/start</code>, чтобы зарегистрироваться."
     intro = "Привет!" if is_new else "С возвращением!"
     sub = "включена ✅" if user.get("active") else "выключена ❌"
+    vip_extra = ""
+    if user.get("role") == "vip":
+        mode = user.get("vip_feed_mode") or "normal"
+        if mode == "below_market":
+            vip_extra = "\n\n🔥 <b>VIP:</b> включён поток «только ниже рынка» (все iPhone). Нажми кнопку снова, чтобы выключить."
+        elif mode == "exchange":
+            vip_extra = "\n\n🔄 <b>VIP:</b> включён поток «только обмен» (все iPhone). Нажми кнопку снова, чтобы выключить."
     return (
         f"{intro}\n\n"
         f"Рассылка объявлений с Kufar: <b>{sub}</b>.\n\n"
         "Дальше всё — <b>только кнопками</b> ниже: так проще и без ошибок ввода.\n"
         "Если меню пропало — снова <code>/start</code>."
+        f"{vip_extra}"
     )
 
 
-def _main_menu_keyboard(*, is_admin: bool) -> InlineKeyboardMarkup:
+def _main_menu_keyboard(*, is_admin: bool, user: dict | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text="📊 Статус", callback_data="nav:status"),
@@ -213,11 +222,29 @@ def _main_menu_keyboard(*, is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💰 Макс. цена", callback_data="nav:price"),
             InlineKeyboardButton(text="⭐ VIP", callback_data="nav:vip"),
         ],
-        [
-            InlineKeyboardButton(text="❓ Помощь", callback_data="nav:help"),
-            InlineKeyboardButton(text="⛔ Отписаться", callback_data="nav:stop"),
-        ],
     ]
+    if user and user.get("role") == "vip":
+        mode = user.get("vip_feed_mode") or "normal"
+        t_bm = "🔥 Ниже рынка (бета)"
+        if mode == "below_market":
+            t_bm = "🔥 Ниже рынка (бета) ✓"
+        t_ex = "🔄 Только обмен (бета)"
+        if mode == "exchange":
+            t_ex = "🔄 Обмен (бета) ✓"
+        rows.append(
+            [
+                InlineKeyboardButton(text=t_bm, callback_data="nav:vipf:bm"),
+                InlineKeyboardButton(text=t_ex, callback_data="nav:vipf:ex"),
+            ]
+        )
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(text="❓ Помощь", callback_data="nav:help"),
+                InlineKeyboardButton(text="⛔ Отписаться", callback_data="nav:stop"),
+            ],
+        ]
+    )
     if is_admin:
         rows.append([InlineKeyboardButton(text="🔐 Админ-панель", callback_data="nav:admin")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -279,7 +306,7 @@ async def on_start(msg: Message) -> None:
     uid = _actor_user_id(msg)
     await msg.answer(
         _main_home_text(user, is_new=is_new),
-        reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid)),
+        reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid), user=user),
         parse_mode=ParseMode.HTML,
     )
 
@@ -326,13 +353,40 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             await _safe_edit_message(
                 cb,
                 _main_home_text(user, is_new=False),
-                reply_markup=_main_menu_keyboard(is_admin=is_admin),
+                reply_markup=_main_menu_keyboard(is_admin=is_admin, user=user),
             )
             await cb.answer()
             return
 
         if user is None:
             await cb.answer("Сначала /start", show_alert=True)
+            return
+
+        if data in ("nav:vipf:bm", "nav:vipf:ex"):
+            if user.get("role") != "vip":
+                await cb.answer("Только для VIP", show_alert=True)
+                return
+            cur = user.get("vip_feed_mode") or "normal"
+            if data == "nav:vipf:bm":
+                new_mode = "normal" if cur == "below_market" else "below_market"
+            else:
+                new_mode = "normal" if cur == "exchange" else "exchange"
+            update_vip_feed_mode(chat_id, new_mode)
+            user = get_user(chat_id)
+            if user is None:
+                await cb.answer("Ошибка", show_alert=True)
+                return
+            await _safe_edit_message(
+                cb,
+                _main_home_text(user, is_new=False),
+                reply_markup=_main_menu_keyboard(is_admin=is_admin, user=user),
+            )
+            hint = (
+                "Только ниже рынка (все iPhone)"
+                if new_mode == "below_market"
+                else ("Только обмен (все iPhone)" if new_mode == "exchange" else "Обычная рассылка")
+            )
+            await cb.answer(hint)
             return
 
         if data == "nav:status":
@@ -522,7 +576,7 @@ async def on_keywords_done(cb: CallbackQuery) -> None:
         + "\n\n✅ <b>Устройства сохранены.</b> Выбрано: "
         + str(len(selected))
         + (f"\n<code>{', '.join(selected)}</code>" if selected else ""),
-        reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid)),
+        reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid), user=user),
     )
     await cb.answer("Сохранено")
 
@@ -666,7 +720,7 @@ async def on_any_text(msg: Message) -> None:
     await msg.answer(
         "Пиши сюда не нужно — всё через кнопки в меню.\n"
         "Нажми <code>/start</code>, если меню пропало.",
-        reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid)) if user else None,
+        reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid), user=user) if user else None,
         parse_mode=ParseMode.HTML,
     )
 

@@ -8,6 +8,44 @@ from config import (
     PHONE_REQUIRED_TERMS,
 )
 
+# Объявления именно про обмен (ищем по всему тексту). «Без обмена» и т.п. — отсекаем.
+EXCHANGE_NEGATIVE_TERMS: tuple[str, ...] = (
+    "без обмена",
+    "без обменов",
+    "обмен не интересует",
+    "обмен не нужен",
+    "обмен не предлагать",
+    "не на обмен",
+    "не интересует обмен",
+    "обмен не рассматриваю",
+    "обмен не предлагаю",
+)
+
+EXCHANGE_HINT_TERMS: tuple[str, ...] = (
+    "обмен",
+    "меняю",
+    "обменяю",
+    "к обмену",
+    "готов к обмену",
+    "готов обмен",
+    "рассмотрю обмен",
+    "рассмотрю варианты обмена",
+    "возможен обмен",
+    "обмен возможен",
+    "интересует обмен",
+    "ищу обмен",
+    "только обмен",
+    "swap",
+    "trade-in",
+    "трейд-ин",
+    "поменяю",
+    "на обмен",
+    "бартер",
+    "обменяюсь",
+    "обмен интересен",
+    "рассмотрю трейд",
+)
+
 NEW_PHONE_TERMS: tuple[str, ...] = (
     "новый",
     "новые",
@@ -104,3 +142,11 @@ def matches_filters(
             return False
 
     return True
+
+
+def is_exchange_ad(ad: dict) -> bool:
+    """Объявление про обмен устройством (по формулировкам в тексте)."""
+    full_text = ad_full_text(ad)
+    if any(normalize(t) in full_text for t in EXCHANGE_NEGATIVE_TERMS):
+        return False
+    return any(normalize(t) in full_text for t in EXCHANGE_HINT_TERMS)

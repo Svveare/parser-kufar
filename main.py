@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import signal
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -18,6 +19,7 @@ from config import (
     FIRST_RUN_LIMIT,
     MARKET_DISCOUNT_THRESHOLD,
     REGULAR_CHECK_INTERVAL,
+    SQLITE_SYNCHRONOUS,
     TOKEN,
     VIP_CHECK_INTERVAL,
 )
@@ -34,10 +36,13 @@ from db import (
     set_active,
 )
 from formatter import format_ad
-from filters import ad_device_key, matches_filters
+from filters import ad_device_key, is_exchange_ad, matches_filters
 from kufar_fetch import fetch_ads
 
 log = logging.getLogger("kufar_bot")
+
+# Для VIP-режимов «все айфоны» — не ограничиваем ценой из профиля
+_VIP_SPECIAL_MAX_PRICE = 99_999_999
 last_run_at: dict[int, float] = {}
 
 
@@ -94,16 +99,51 @@ async def _send_ad(
 async def _process_user(bot: Bot, user: dict, ads: list[dict]) -> None:
     chat_id = user["chat_id"]
     is_vip = user.get("role") == "vip"
-    matched = [
-        a
-        for a in ads
-        if matches_filters(
-            a,
-            user["max_price"],
-            user["keywords"],
-            smart_filtering=is_vip,
-        )
-    ]
+    feed_mode = (user.get("vip_feed_mode") or "normal") if is_vip else "normal"
+
+    if is_vip and feed_mode == "below_market":
+        pool = [
+            a
+            for a in ads
+            if matches_filters(
+                a,
+                _VIP_SPECIAL_MAX_PRICE,
+                [],
+                smart_filtering=True,
+            )
+        ]
+        matched = []
+        for a in pool:
+            dk = ad_device_key(a)
+            price = a.get("price")
+            if not dk or not isinstance(price, int) or price <= 0:
+                continue
+            mavg = avg_market_price(dk)
+            if mavg and price < int(mavg * MARKET_DISCOUNT_THRESHOLD):
+                matched.append(a)
+    elif is_vip and feed_mode == "exchange":
+        matched = [
+            a
+            for a in ads
+            if matches_filters(
+                a,
+                _VIP_SPECIAL_MAX_PRICE,
+                [],
+                smart_filtering=True,
+            )
+            and is_exchange_ad(a)
+        ]
+    else:
+        matched = [
+            a
+            for a in ads
+            if matches_filters(
+                a,
+                user["max_price"],
+                user["keywords"],
+                smart_filtering=is_vip,
+            )
+        ]
     if not matched:
         return
 
@@ -128,7 +168,9 @@ async def _process_user(bot: Bot, user: dict, ads: list[dict]) -> None:
         if is_vip:
             if device_key:
                 market_avg = avg_market_price(device_key)
-            if market_avg and price and price < int(market_avg * MARKET_DISCOUNT_THRESHOLD):
+            if feed_mode == "below_market":
+                below_market = True
+            elif market_avg and price and price < int(market_avg * MARKET_DISCOUNT_THRESHOLD):
                 below_market = True
         ok = await _send_ad(
             bot,
@@ -197,6 +239,7 @@ async def main() -> None:
         sys.exit(1)
 
     init_db()
+    log.info("[BOT] SQLite synchronous=%s (см. SQLITE_SYNCHRONOUS в .env)", SQLITE_SYNCHRONOUS)
 
     bot = Bot(
         token=TOKEN,
@@ -204,6 +247,13 @@ async def main() -> None:
     )
     dp = Dispatcher()
     dp.include_router(handlers.router)
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, dp.stop_polling)
+        except NotImplementedError:
+            pass
 
     poll_task = asyncio.create_task(poller(bot))
 

@@ -6,6 +6,20 @@ load_dotenv()
 
 TOKEN = os.getenv("TOKEN", "").strip()
 
+# Путь к SQLite. Пусто = файл bot.db в папке проекта (рядом с db.py), не зависит от cwd.
+# На Docker/PaaS без постоянного диска задайте путь на volume, например /data/bot.db
+DB_PATH = os.getenv("DB_PATH", "").strip()
+
+# Ожидание блокировки SQLite, сек. (параметр timeout в sqlite3.connect).
+# Жёсткость записи на диск: SQLITE_SYNCHRONOUS = NORMAL | FULL | EXTRA (см. документацию SQLite).
+SQLITE_BUSY_TIMEOUT = float(os.getenv("SQLITE_BUSY_TIMEOUT", "30"))
+_sqlite_sync = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL").strip().upper()
+SQLITE_SYNCHRONOUS = _sqlite_sync if _sqlite_sync in ("OFF", "NORMAL", "FULL", "EXTRA") else "NORMAL"
+
+# Повтор запроса к Kufar при сетевых ошибках / 5xx
+KUFAR_FETCH_RETRIES = max(1, int(os.getenv("KUFAR_FETCH_RETRIES", "3")))
+KUFAR_FETCH_RETRY_DELAY = float(os.getenv("KUFAR_FETCH_RETRY_DELAY", "2"))
+
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 REGULAR_CHECK_INTERVAL = int(os.getenv("REGULAR_CHECK_INTERVAL", "600"))
 VIP_CHECK_INTERVAL = int(os.getenv("VIP_CHECK_INTERVAL", "60"))

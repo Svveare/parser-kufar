@@ -61,6 +61,14 @@ def format_status(user: dict) -> str:
         dt = datetime.fromtimestamp(vip_until, tz=timezone.utc).astimezone()
         vip_until_text = dt.strftime("%d.%m.%Y %H:%M")
 
+    vip_feed = ""
+    if user.get("role") == "vip":
+        mode = user.get("vip_feed_mode") or "normal"
+        if mode == "below_market":
+            vip_feed = "\n<b>VIP-поток:</b> только ниже рынка (все iPhone)"
+        elif mode == "exchange":
+            vip_feed = "\n<b>VIP-поток:</b> только обмен (все iPhone)"
+
     return (
         f"<b>Статус подписки:</b> {active}\n"
         f"<b>Тип пользователя:</b> {role}\n"
@@ -68,6 +76,7 @@ def format_status(user: dict) -> str:
         f"<b>Макс. цена:</b> {max_price} р.\n"
         f"<b>Ключевики:</b> {_esc(kw)}\n"
         f"<b>Прислано объявлений:</b> {sent}"
+        f"{vip_feed}"
     )
 
 

@@ -1,16 +1,46 @@
+import logging
 import sqlite3
 import time
+from pathlib import Path
 from typing import Optional
 
-from config import DEFAULT_MAX_PRICE, DEFAULT_KEYWORDS, VIP_SUBSCRIPTION_DAYS
+from config import (
+    DB_PATH as DB_PATH_OVERRIDE,
+    DEFAULT_KEYWORDS,
+    DEFAULT_MAX_PRICE,
+    SQLITE_BUSY_TIMEOUT,
+    SQLITE_SYNCHRONOUS,
+    VIP_SUBSCRIPTION_DAYS,
+)
 
-DB_PATH = "bot.db"
+log = logging.getLogger(__name__)
+
+_SQLITE_SYNC_NUM = {"OFF": 0, "NORMAL": 1, "FULL": 2, "EXTRA": 3}[SQLITE_SYNCHRONOUS]
+
+
+def _sqlite_path() -> str:
+    """Абсолютный путь к файлу БД: из DB_PATH или bot.db рядом с этим модулем (не от cwd)."""
+    if DB_PATH_OVERRIDE:
+        p = Path(DB_PATH_OVERRIDE).expanduser().resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return str(p)
+    return str(Path(__file__).resolve().parent / "bot.db")
+
+
+SQLITE_PATH = _sqlite_path()
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
+    conn = sqlite3.connect(
+        SQLITE_PATH,
+        timeout=SQLITE_BUSY_TIMEOUT,
+        check_same_thread=False,
+        isolation_level=None,
+    )
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA synchronous={_SQLITE_SYNC_NUM}")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA temp_store=MEMORY")
     return conn
 
 
@@ -23,12 +53,11 @@ def _table_columns(name: str) -> set[str]:
 
 
 def init_db() -> None:
+    log.info("SQLite database file: %s", SQLITE_PATH)
     # Старая схема (с прошлых экспериментов) — сносим, чтобы создать заново
     existing = _table_columns("users")
     if existing and "active" not in existing:
         conn.execute("DROP TABLE users")
-
-    conn.execute("DROP TABLE IF EXISTS ads")  # legacy
 
     conn.executescript(
         """
@@ -76,6 +105,10 @@ def init_db() -> None:
         conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'regular'")
     if "vip_until" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN vip_until INTEGER NOT NULL DEFAULT 0")
+    if "vip_feed_mode" not in cols:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN vip_feed_mode TEXT NOT NULL DEFAULT 'normal'"
+        )
 
 
 def add_user(chat_id: int) -> bool:
@@ -84,8 +117,9 @@ def add_user(chat_id: int) -> bool:
     row = cur.fetchone()
     if row is None:
         conn.execute(
-            "INSERT INTO users (chat_id, active, role, vip_until, max_price, keywords, created_at) "
-            "VALUES (?, 1, 'regular', 0, ?, ?, ?)",
+            "INSERT INTO users (chat_id, active, role, vip_until, max_price, keywords, "
+            "created_at, vip_feed_mode) "
+            "VALUES (?, 1, 'regular', 0, ?, ?, ?, 'normal')",
             (
                 chat_id,
                 DEFAULT_MAX_PRICE,
@@ -109,8 +143,8 @@ def set_active(chat_id: int, active: bool) -> None:
 def get_user(chat_id: int) -> Optional[dict]:
     _expire_vip(chat_id)
     cur = conn.execute(
-        "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at "
-        "FROM users WHERE chat_id = ?",
+        "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at, "
+        "vip_feed_mode FROM users WHERE chat_id = ?",
         (chat_id,),
     )
     row = cur.fetchone()
@@ -125,6 +159,7 @@ def get_user(chat_id: int) -> Optional[dict]:
         "keywords": [k.strip() for k in row[5].split(",") if k.strip()],
         "sent_count": row[6],
         "created_at": row[7],
+        "vip_feed_mode": row[8] or "normal",
     }
 
 
@@ -149,8 +184,8 @@ def count_users_vip() -> int:
 
 def list_users_page(*, offset: int, limit: int) -> list[dict]:
     cur = conn.execute(
-        "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at "
-        "FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at, "
+        "vip_feed_mode FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (limit, offset),
     )
     rows = []
@@ -165,6 +200,7 @@ def list_users_page(*, offset: int, limit: int) -> list[dict]:
                 "keywords": [k.strip() for k in r[5].split(",") if k.strip()],
                 "sent_count": r[6],
                 "created_at": r[7],
+                "vip_feed_mode": r[8] or "normal",
             }
         )
     return rows
@@ -178,8 +214,8 @@ def clear_market_prices() -> int:
 def get_active_users() -> list[dict]:
     _expire_all_vip()
     cur = conn.execute(
-        "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at "
-        "FROM users WHERE active = 1"
+        "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at, "
+        "vip_feed_mode FROM users WHERE active = 1"
     )
     return [
         {
@@ -191,6 +227,7 @@ def get_active_users() -> list[dict]:
             "keywords": [k.strip() for k in r[5].split(",") if k.strip()],
             "sent_count": r[6],
             "created_at": r[7],
+            "vip_feed_mode": r[8] or "normal",
         }
         for r in cur.fetchall()
     ]
@@ -278,8 +315,28 @@ def avg_market_price(device_key: str) -> int | None:
     return int(avg_value)
 
 
+def update_vip_feed_mode(chat_id: int, mode: str) -> None:
+    if mode not in ("normal", "below_market", "exchange"):
+        return
+    conn.execute(
+        "UPDATE users SET vip_feed_mode = ? WHERE chat_id = ? AND role = 'vip'",
+        (mode, chat_id),
+    )
+
+
+def checkpoint_wal() -> None:
+    """Сброс WAL на диск (безопаснее при копировании bot.db и при остановке процесса)."""
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        log.warning("PRAGMA wal_checkpoint не удался", exc_info=True)
+
+
 def close() -> None:
-    conn.close()
+    try:
+        checkpoint_wal()
+    finally:
+        conn.close()
 
 
 def set_vip(chat_id: int, *, days: int = VIP_SUBSCRIPTION_DAYS) -> None:
@@ -304,7 +361,8 @@ def set_vip(chat_id: int, *, days: int = VIP_SUBSCRIPTION_DAYS) -> None:
 
 def revoke_vip(chat_id: int) -> None:
     conn.execute(
-        "UPDATE users SET role = 'regular', vip_until = 0 WHERE chat_id = ?",
+        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal' "
+        "WHERE chat_id = ?",
         (chat_id,),
     )
 
@@ -312,7 +370,7 @@ def revoke_vip(chat_id: int) -> None:
 def _expire_vip(chat_id: int) -> None:
     now = int(time.time())
     conn.execute(
-        "UPDATE users SET role = 'regular', vip_until = 0 "
+        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal' "
         "WHERE chat_id = ? AND role = 'vip' AND vip_until > 0 AND vip_until < ?",
         (chat_id, now),
     )
@@ -321,7 +379,7 @@ def _expire_vip(chat_id: int) -> None:
 def _expire_all_vip() -> None:
     now = int(time.time())
     conn.execute(
-        "UPDATE users SET role = 'regular', vip_until = 0 "
+        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal' "
         "WHERE role = 'vip' AND vip_until > 0 AND vip_until < ?",
         (now,),
     )

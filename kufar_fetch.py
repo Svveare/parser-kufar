@@ -8,7 +8,13 @@ from typing import Any, Optional
 
 import aiohttp
 
-from config import KUFAR_QUERY, KUFAR_REGION, KUFAR_SIZE
+from config import (
+    KUFAR_FETCH_RETRIES,
+    KUFAR_FETCH_RETRY_DELAY,
+    KUFAR_QUERY,
+    KUFAR_REGION,
+    KUFAR_SIZE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -124,14 +130,35 @@ async def _fetch_search(session: aiohttp.ClientSession) -> list[dict]:
         "cur": "BYR",
         "query": KUFAR_QUERY,
     }
-    async with session.get(
-        SEARCH_URL, params=params, timeout=aiohttp.ClientTimeout(total=20)
-    ) as r:
-        if r.status != 200:
-            log.error("[KUFAR] search status=%s body=%s", r.status, (await r.text())[:300])
-            return []
-        data = await r.json()
-    return data.get("ads") or []
+    last_err: str | None = None
+    for attempt in range(1, KUFAR_FETCH_RETRIES + 1):
+        try:
+            async with session.get(
+                SEARCH_URL, params=params, timeout=aiohttp.ClientTimeout(total=25)
+            ) as r:
+                if r.status >= 500 or r.status == 429:
+                    body = (await r.text())[:200]
+                    last_err = f"status={r.status} {body}"
+                    log.warning("[KUFAR] search %s (попытка %s/%s)", last_err, attempt, KUFAR_FETCH_RETRIES)
+                elif r.status != 200:
+                    log.error("[KUFAR] search status=%s body=%s", r.status, (await r.text())[:300])
+                    return []
+                else:
+                    data = await r.json()
+                    return data.get("ads") or []
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            last_err = repr(e)
+            log.warning(
+                "[KUFAR] search сеть: %s (попытка %s/%s)",
+                last_err,
+                attempt,
+                KUFAR_FETCH_RETRIES,
+            )
+        if attempt < KUFAR_FETCH_RETRIES:
+            await asyncio.sleep(KUFAR_FETCH_RETRY_DELAY * attempt)
+    if last_err:
+        log.error("[KUFAR] search не удался после %s попыток: %s", KUFAR_FETCH_RETRIES, last_err)
+    return []
 
 
 async def _fetch_description(session: aiohttp.ClientSession, link: str) -> str:
