@@ -248,10 +248,13 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(handlers.router)
 
+    def _schedule_stop_polling() -> None:
+        asyncio.create_task(dp.stop_polling())
+
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, dp.stop_polling)
+            loop.add_signal_handler(sig, _schedule_stop_polling)
         except NotImplementedError:
             pass
 
