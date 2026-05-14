@@ -1,9 +1,9 @@
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import ADMIN_IDS, DEVICE_CATALOG, MAX_PRICE_PRESETS, VIP_PRICE_USD
@@ -43,6 +43,30 @@ def _maybe_refresh_username(chat_id: int, from_user) -> None:
     if from_user is None or from_user.id != chat_id:
         return
     update_user_username(chat_id, from_user.username)
+
+
+async def enrich_username_from_get_chat(bot: Bot, user: dict) -> None:
+    """Если в БД нет @username — пробуем get_chat (работает для пользователей, с кем бот общался)."""
+    if (user.get("username") or "").strip():
+        return
+    chat_id = user.get("chat_id")
+    if chat_id is None:
+        return
+    try:
+        chat = await bot.get_chat(chat_id)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return
+    un = getattr(chat, "username", None) or ""
+    un = un.strip()
+    if not un:
+        return
+    user["username"] = un
+    update_user_username(int(chat_id), un)
+
+
+async def format_user_status_html(bot: Bot, user: dict) -> str:
+    await enrich_username_from_get_chat(bot, user)
+    return format_status(user)
 
 _GOODS_CRUMB = "📦 <b>Товары</b>"
 
@@ -324,10 +348,6 @@ def _admin_users_keyboard(page: int) -> InlineKeyboardMarkup:
     rows.append(nav)
     rows.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="adm:h")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _admin_user_card_text(u: dict) -> str:
-    return format_status(u)
 
 
 def _admin_user_keyboard(chat_id: int) -> InlineKeyboardMarkup:
@@ -622,9 +642,10 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             return
 
         if data == "nav:status":
+            status_html = await format_user_status_html(cb.bot, user)
             await _safe_edit_message(
                 cb,
-                format_status(user),
+                status_html,
                 reply_markup=_status_reply_markup(user),
             )
             await cb.answer()
@@ -1053,9 +1074,10 @@ async def on_admin_callback(cb: CallbackQuery) -> None:
             if u is None:
                 await cb.answer("Пользователь не найден", show_alert=True)
                 return
+            card = await format_user_status_html(cb.bot, u)
             await _safe_edit_message(
                 cb,
-                _admin_user_card_text(u),
+                card,
                 reply_markup=_admin_user_keyboard(target_id),
             )
             await cb.answer()
@@ -1072,9 +1094,10 @@ async def on_admin_callback(cb: CallbackQuery) -> None:
             if u is None:
                 await cb.answer("Ошибка сохранения", show_alert=True)
                 return
+            card = await format_user_status_html(cb.bot, u)
             await _safe_edit_message(
                 cb,
-                _admin_user_card_text(u),
+                card,
                 reply_markup=_admin_user_keyboard(target_id),
             )
             await cb.answer(f"VIP +{days} дн.")
@@ -1087,9 +1110,10 @@ async def on_admin_callback(cb: CallbackQuery) -> None:
             if u is None:
                 await cb.answer("Пользователь не найден", show_alert=True)
                 return
+            card = await format_user_status_html(cb.bot, u)
             await _safe_edit_message(
                 cb,
-                _admin_user_card_text(u),
+                card,
                 reply_markup=_admin_user_keyboard(target_id),
             )
             await cb.answer("VIP снят")

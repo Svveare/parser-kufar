@@ -76,10 +76,19 @@ def format_status(user: dict) -> str:
             "В главном меню нажми <b>«Включить рассылку»</b> или отправь <code>/start</code>."
         )
 
+    cid = user.get("chat_id")
     un = (user.get("username") or "").strip()
-    username_line = (
-        f"<b>Username:</b> @{_esc(un)}\n" if un else "<b>Username:</b> не задан\n"
-    )
+    if un:
+        uq = _esc(un)
+        username_line = f'<b>Username:</b> <a href="https://t.me/{uq}">@{uq}</a>\n'
+    elif cid is not None:
+        cid_i = int(cid)
+        username_line = (
+            f'<b>Username:</b> нет публичного @ · '
+            f'<a href="tg://user?id={cid_i}">открыть профиль</a>\n'
+        )
+    else:
+        username_line = "<b>Username:</b> не задан\n"
 
     return (
         f"<b>Статус подписки:</b> {active}\n"
