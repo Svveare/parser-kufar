@@ -205,7 +205,7 @@ async def _process_user(bot: Bot, user: dict, ads: list[dict]) -> None:
                 and price > 0
             ):
                 save_market_price(ad["link"], device_key, price)
-        await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)
 
 
 async def poller(bot: Bot) -> None:

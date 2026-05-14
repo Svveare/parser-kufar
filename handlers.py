@@ -67,7 +67,8 @@ def _admin_home_text() -> str:
     return (
         "🔐 <b>Админ-панель</b>\n\n"
         "Управление ботом — только через кнопки ниже.\n"
-        "Отдельные админ-команды не нужны: всё здесь.\n\n"
+        "Отдельные админ-команды не нужны: всё здесь.\n"
+        "<i>Пользователи работают с ботом через /start и кнопки меню.</i>\n\n"
         "<i>Подсказка:</i> пользователи в списке — от новых к старым."
     )
 
@@ -196,33 +197,59 @@ def _main_home_text(user: dict | None, *, is_new: bool) -> str:
         return "Нажми <code>/start</code>, чтобы зарегистрироваться."
     intro = "Привет!" if is_new else "С возвращением!"
     sub = "включена ✅" if user.get("active") else "выключена ❌"
-    vip_extra = ""
+    lines = [
+        intro,
+        "",
+        f"Рассылка Kufar: <b>{sub}</b>",
+    ]
+    if not user.get("active"):
+        lines += [
+            "",
+            "Объявления <b>не приходят</b>. Включи снова кнопкой <b>«Включить рассылку»</b> ниже "
+            "или командой <code>/start</code>.",
+        ]
     if user.get("role") == "vip":
         mode = user.get("vip_feed_mode") or "normal"
         if mode == "below_market":
-            vip_extra = "\n\n🔥 <b>VIP:</b> включён поток «только ниже рынка» (все iPhone). Нажми кнопку снова, чтобы выключить."
+            lines += [
+                "",
+                "🔥 <b>VIP-поток:</b> только объявления ниже средней цены по рынку (все iPhone). "
+                "Повторное нажатие кнопки — выключить.",
+            ]
         elif mode == "exchange":
-            vip_extra = "\n\n🔄 <b>VIP:</b> включён поток «только обмен» (все iPhone). Нажми кнопку снова, чтобы выключить."
-    return (
-        f"{intro}\n\n"
-        f"Рассылка объявлений с Kufar: <b>{sub}</b>.\n\n"
-        "Дальше всё — <b>только кнопками</b> ниже: так проще и без ошибок ввода.\n"
-        "Если меню пропало — снова <code>/start</code>."
-        f"{vip_extra}"
-    )
+            lines += [
+                "",
+                "🔄 <b>VIP-поток:</b> только объявления про обмен (все iPhone). "
+                "Повторное нажатие кнопки — выключить.",
+            ]
+        else:
+            lines += [
+                "",
+                "⭐ <b>VIP:</b> дополнительно можно включить потоки «ниже рынка» или «только обмен» "
+                "(все iPhone, не только выбранные модели) — кнопками ниже.",
+            ]
+    lines += ["", "Навигация — <b>кнопками</b>. Пропало меню — <code>/start</code>."]
+    return "\n".join(lines)
 
 
 def _main_menu_keyboard(*, is_admin: bool, user: dict | None = None) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
+    rows: list[list[InlineKeyboardButton]] = []
+    if user and not user.get("active"):
+        rows.append(
+            [InlineKeyboardButton(text="🔔 Включить рассылку", callback_data="nav:resume")],
+        )
+    rows.extend(
         [
-            InlineKeyboardButton(text="📊 Статус", callback_data="nav:status"),
-            InlineKeyboardButton(text="📱 Устройства", callback_data="nav:devices"),
-        ],
-        [
-            InlineKeyboardButton(text="💰 Макс. цена", callback_data="nav:price"),
-            InlineKeyboardButton(text="⭐ VIP", callback_data="nav:vip"),
-        ],
-    ]
+            [
+                InlineKeyboardButton(text="📊 Статус", callback_data="nav:status"),
+                InlineKeyboardButton(text="📱 Устройства", callback_data="nav:devices"),
+            ],
+            [
+                InlineKeyboardButton(text="💰 Макс. цена", callback_data="nav:price"),
+                InlineKeyboardButton(text="⭐ VIP", callback_data="nav:vip"),
+            ],
+        ]
+    )
     if user and user.get("role") == "vip":
         mode = user.get("vip_feed_mode") or "normal"
         t_bm = "🔥 Ниже рынка (бета)"
@@ -237,14 +264,12 @@ def _main_menu_keyboard(*, is_admin: bool, user: dict | None = None) -> InlineKe
                 InlineKeyboardButton(text=t_ex, callback_data="nav:vipf:ex"),
             ]
         )
-    rows.extend(
-        [
-            [
-                InlineKeyboardButton(text="❓ Помощь", callback_data="nav:help"),
-                InlineKeyboardButton(text="⛔ Отписаться", callback_data="nav:stop"),
-            ],
-        ]
-    )
+    bottom = [
+        InlineKeyboardButton(text="❓ Помощь", callback_data="nav:help"),
+    ]
+    if user and user.get("active"):
+        bottom.append(InlineKeyboardButton(text="⛔ Отписаться", callback_data="nav:stop"))
+    rows.append(bottom)
     if is_admin:
         rows.append([InlineKeyboardButton(text="🔐 Админ-панель", callback_data="nav:admin")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -254,11 +279,13 @@ def _nav_back_home_button() -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:home")]
 
 
-def _price_presets_keyboard() -> InlineKeyboardMarkup:
+def _price_presets_keyboard(user: dict | None) -> InlineKeyboardMarkup:
+    cur = user.get("max_price") if user else None
     row: list[InlineKeyboardButton] = []
     rows: list[list[InlineKeyboardButton]] = []
     for p in MAX_PRICE_PRESETS:
-        row.append(InlineKeyboardButton(text=f"{p} р.", callback_data=f"nav:set:{p}"))
+        label = f"✓ {p} р." if cur is not None and int(cur) == int(p) else f"{p} р."
+        row.append(InlineKeyboardButton(text=label, callback_data=f"nav:set:{p}"))
         if len(row) >= 3:
             rows.append(row)
             row = []
@@ -266,6 +293,7 @@ def _price_presets_keyboard() -> InlineKeyboardMarkup:
         rows.append(row)
     rows.append(_nav_back_home_button())
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def _price_screen_text(user: dict | None) -> str:
     cur = user.get("max_price") if user else None
@@ -275,6 +303,18 @@ def _price_screen_text(user: dict | None) -> str:
         f"Сейчас: {cur_txt}\n\n"
         "Выбери лимит кнопкой ниже."
     )
+
+
+def _status_reply_markup(user: dict) -> InlineKeyboardMarkup:
+    row = list(_nav_back_home_button())
+    if not user.get("active"):
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔔 Включить рассылку", callback_data="nav:resume")],
+                row,
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 def _stop_confirm_keyboard() -> InlineKeyboardMarkup:
@@ -293,7 +333,9 @@ def _vip_info_text() -> str:
         "⭐ <b>VIP</b>\n\n"
         f"Подписка: <b>{VIP_PRICE_USD}$</b> на 30 дней.\n"
         "По оплате напишите: @manohio\n"
-        "После оплаты админ активирует VIP вручную."
+        "После оплаты админ активирует VIP вручную.\n\n"
+        "С VIP доступны бета-потоки: <b>ниже рынка</b> и <b>только обмен</b> "
+        "(все iPhone с листинга, не только выбранные модели) — кнопками в главном меню."
     )
 
 
@@ -362,6 +404,24 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             await cb.answer("Сначала /start", show_alert=True)
             return
 
+        if data == "nav:resume":
+            if user.get("active"):
+                await cb.answer("Рассылка уже включена")
+                return
+            set_active(chat_id, True)
+            log.info("[RESUME] chat_id=%s", chat_id)
+            user = get_user(chat_id)
+            if user is None:
+                await cb.answer("Ошибка", show_alert=True)
+                return
+            await _safe_edit_message(
+                cb,
+                _main_home_text(user, is_new=False),
+                reply_markup=_main_menu_keyboard(is_admin=is_admin, user=user),
+            )
+            await cb.answer("Рассылка включена")
+            return
+
         if data in ("nav:vipf:bm", "nav:vipf:ex"):
             if user.get("role") != "vip":
                 await cb.answer("Только для VIP", show_alert=True)
@@ -393,7 +453,7 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             await _safe_edit_message(
                 cb,
                 format_status(user),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_nav_back_home_button()]),
+                reply_markup=_status_reply_markup(user),
             )
             await cb.answer()
             return
@@ -411,7 +471,7 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             await _safe_edit_message(
                 cb,
                 _price_screen_text(user),
-                reply_markup=_price_presets_keyboard(),
+                reply_markup=_price_presets_keyboard(user),
             )
             await cb.answer()
             return
@@ -424,7 +484,7 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             await _safe_edit_message(
                 cb,
                 _price_screen_text(user),
-                reply_markup=_price_presets_keyboard(),
+                reply_markup=_price_presets_keyboard(user),
             )
             await cb.answer("Сохранено")
             return
@@ -450,11 +510,15 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
         if data == "nav:stop:yes":
             set_active(chat_id, False)
             log.info("[STOP] chat_id=%s (inline)", chat_id)
+            user = get_user(chat_id)
             await _safe_edit_message(
                 cb,
                 "Подписка выключена ❌\n\n"
-                "Чтобы снова получать объявления — нажми <code>/start</code>.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_nav_back_home_button()]),
+                "Чтобы снова получать объявления — кнопка <b>«Включить рассылку»</b> в главном меню "
+                "или команда <code>/start</code>.",
+                reply_markup=_main_menu_keyboard(is_admin=is_admin, user=user)
+                if user
+                else InlineKeyboardMarkup(inline_keyboard=[_nav_back_home_button()]),
             )
             await cb.answer("Готово")
             return
@@ -463,7 +527,8 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             await _safe_edit_message(
                 cb,
                 "⛔ <b>Отписаться от рассылки?</b>\n\n"
-                "Объявления перестанут приходить. Включить снова можно через <code>/start</code>.",
+                "Объявления перестанут приходить.\n"
+                "Включить снова: кнопка <b>«Включить рассылку»</b> в меню или <code>/start</code>.",
                 reply_markup=_stop_confirm_keyboard(),
             )
             await cb.answer()
@@ -650,7 +715,7 @@ async def on_admin_callback(cb: CallbackQuery) -> None:
             set_vip(target_id, days=days)
             u = get_user(target_id)
             if u is None:
-                await cb.answer()
+                await cb.answer("Ошибка сохранения", show_alert=True)
                 return
             await _safe_edit_message(
                 cb,
@@ -717,9 +782,14 @@ async def on_any_text(msg: Message) -> None:
         return
     user = get_user(msg.chat.id)
     uid = _actor_user_id(msg)
-    await msg.answer(
+    hint = (
         "Пиши сюда не нужно — всё через кнопки в меню.\n"
-        "Нажми <code>/start</code>, если меню пропало.",
+        "Нажми <code>/start</code>, если меню пропало."
+    )
+    if user and not user.get("active"):
+        hint += "\n\nРассылка выключена — в меню кнопка <b>«Включить рассылку»</b>."
+    await msg.answer(
+        hint,
         reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid), user=user) if user else None,
         parse_mode=ParseMode.HTML,
     )
@@ -731,7 +801,7 @@ def _build_keywords_text(user: dict) -> str:
     limit = "без лимита" if role == "vip" else "до 5"
     return (
         "📱 <b>Устройства</b>\n\n"
-        "Выбери модели кнопками ниже.\n"
+        "Нажми на модель — вкл/выкл. Внизу <b>«Готово»</b> — вернуться в меню.\n"
         f"Лимит: <b>{limit}</b>\n\n"
         f"Выбрано: <b>{len(selected)}</b>\n"
         + ("<code>" + ", ".join(selected) + "</code>" if selected else "Пока пусто.")
