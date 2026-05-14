@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 _SQLITE_SYNC_NUM = {"OFF": 0, "NORMAL": 1, "FULL": 2, "EXTRA": 3}[SQLITE_SYNCHRONOUS]
 
 
+def _norm_username(username: str | None) -> str:
+    if not username:
+        return ""
+    return username.strip().lstrip("@")[:64]
+
+
 def _sqlite_path() -> str:
     """Абсолютный путь к файлу БД: из DB_PATH или bot.db рядом с этим модулем (не от cwd)."""
     if DB_PATH_OVERRIDE:
@@ -109,27 +115,44 @@ def init_db() -> None:
         conn.execute(
             "ALTER TABLE users ADD COLUMN vip_feed_mode TEXT NOT NULL DEFAULT 'normal'"
         )
+    if "username" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN username TEXT NOT NULL DEFAULT ''")
 
 
-def add_user(chat_id: int) -> bool:
+def update_user_username(chat_id: int, username: str | None) -> None:
+    """Telegram @username без «@»; пусто — сброс."""
+    conn.execute(
+        "UPDATE users SET username = ? WHERE chat_id = ?",
+        (_norm_username(username), chat_id),
+    )
+
+
+def add_user(chat_id: int, *, username: str | None = None) -> bool:
     """Добавить пользователя или реактивировать. True если это новый юзер."""
+    u = _norm_username(username)
     cur = conn.execute("SELECT active FROM users WHERE chat_id = ?", (chat_id,))
     row = cur.fetchone()
     if row is None:
         conn.execute(
             "INSERT INTO users (chat_id, active, role, vip_until, max_price, keywords, "
-            "created_at, vip_feed_mode) "
-            "VALUES (?, 1, 'regular', 0, ?, ?, ?, 'normal')",
+            "created_at, vip_feed_mode, username) "
+            "VALUES (?, 1, 'regular', 0, ?, ?, ?, 'normal', ?)",
             (
                 chat_id,
                 DEFAULT_MAX_PRICE,
                 ",".join(DEFAULT_KEYWORDS),
                 int(time.time()),
+                u,
             ),
         )
         return True
     if row[0] == 0:
-        conn.execute("UPDATE users SET active = 1 WHERE chat_id = ?", (chat_id,))
+        conn.execute(
+            "UPDATE users SET active = 1, username = ? WHERE chat_id = ?",
+            (u, chat_id),
+        )
+    else:
+        conn.execute("UPDATE users SET username = ? WHERE chat_id = ?", (u, chat_id))
     return False
 
 
@@ -144,7 +167,7 @@ def get_user(chat_id: int) -> Optional[dict]:
     _expire_vip(chat_id)
     cur = conn.execute(
         "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at, "
-        "vip_feed_mode FROM users WHERE chat_id = ?",
+        "vip_feed_mode, username FROM users WHERE chat_id = ?",
         (chat_id,),
     )
     row = cur.fetchone()
@@ -160,6 +183,7 @@ def get_user(chat_id: int) -> Optional[dict]:
         "sent_count": row[6],
         "created_at": row[7],
         "vip_feed_mode": row[8] or "normal",
+        "username": (row[9] or "").strip() if len(row) > 9 else "",
     }
 
 
@@ -185,7 +209,7 @@ def count_users_vip() -> int:
 def list_users_page(*, offset: int, limit: int) -> list[dict]:
     cur = conn.execute(
         "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at, "
-        "vip_feed_mode FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "vip_feed_mode, username FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (limit, offset),
     )
     rows = []
@@ -201,6 +225,7 @@ def list_users_page(*, offset: int, limit: int) -> list[dict]:
                 "sent_count": r[6],
                 "created_at": r[7],
                 "vip_feed_mode": r[8] or "normal",
+                "username": (r[9] or "").strip() if len(r) > 9 else "",
             }
         )
     return rows
@@ -215,7 +240,7 @@ def get_active_users() -> list[dict]:
     _expire_all_vip()
     cur = conn.execute(
         "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at, "
-        "vip_feed_mode FROM users WHERE active = 1"
+        "vip_feed_mode, username FROM users WHERE active = 1"
     )
     return [
         {
@@ -228,6 +253,7 @@ def get_active_users() -> list[dict]:
             "sent_count": r[6],
             "created_at": r[7],
             "vip_feed_mode": r[8] or "normal",
+            "username": (r[9] or "").strip() if len(r) > 9 else "",
         }
         for r in cur.fetchall()
     ]

@@ -28,6 +28,7 @@ from db import (
     set_vip,
     update_keywords,
     update_max_price,
+    update_user_username,
     update_vip_feed_mode,
 )
 from formatter import HELP_TEXT, format_status
@@ -36,6 +37,12 @@ log = logging.getLogger(__name__)
 router = Router()
 PER_PAGE = 8
 ADM_USERS_PER_PAGE = 6
+
+
+def _maybe_refresh_username(chat_id: int, from_user) -> None:
+    if from_user is None or from_user.id != chat_id:
+        return
+    update_user_username(chat_id, from_user.username)
 
 _GOODS_CRUMB = "📦 <b>Товары</b>"
 
@@ -292,9 +299,20 @@ def _admin_users_keyboard(page: int) -> InlineKeyboardMarkup:
         role_icon = "⭐" if u.get("role") == "vip" else "·"
         act = "✅" if u.get("active") else "⏸"
         n_kw = len(u.get("keywords") or [])
-        label = f"{act}{role_icon} {cid} · {n_kw} устр."
+        un = (u.get("username") or "").strip()
+        suffix = f" · {n_kw} устр."
+        prefix = f"{act}{role_icon} "
+        if un:
+            room = 58 - len(prefix) - len(suffix)
+            if room >= 4:
+                handle = f"@{un}" if len(un) + 1 <= room else f"@{un[: max(1, room - 2)]}…"
+            else:
+                handle = str(cid)
+        else:
+            handle = str(cid)
+        label = prefix + handle + suffix
         if len(label) > 58:
-            label = f"{act}{role_icon} {cid}"
+            label = f"{prefix}{cid}"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"adm:u:{cid}")])
 
     nav: list[InlineKeyboardButton] = []
@@ -492,7 +510,8 @@ def _vip_info_text() -> str:
 @router.message(CommandStart())
 async def on_start(msg: Message) -> None:
     chat_id = msg.chat.id
-    is_new = add_user(chat_id)
+    un = msg.from_user.username if msg.from_user else None
+    is_new = add_user(chat_id, username=un)
     log.info("[START] chat_id=%s new=%s", chat_id, is_new)
     user = get_user(chat_id)
     uid = _actor_user_id(msg)
@@ -530,6 +549,9 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
     parts = data.split(":")
 
     user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
     is_admin = _is_admin(uid)
 
     try:
@@ -713,6 +735,9 @@ async def on_goods_callback(cb: CallbackQuery) -> None:
     chat_id = cb.message.chat.id
     data = (cb.data or "").strip()
     user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
 
     if user is None:
         await cb.answer("Сначала /start", show_alert=True)
@@ -798,6 +823,9 @@ async def on_goods_line_callback(cb: CallbackQuery) -> None:
     arg = int(arg_raw)
 
     user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
     if user is None:
         await cb.answer("Сначала /start", show_alert=True)
         return
@@ -878,7 +906,11 @@ async def on_keywords_page(cb: CallbackQuery) -> None:
     if cb.message is None:
         await cb.answer()
         return
-    user = get_user(cb.message.chat.id)
+    chat_id = cb.message.chat.id
+    user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
     if user is None:
         await cb.answer("Сначала /start", show_alert=True)
         return
@@ -897,7 +929,11 @@ async def on_keywords_toggle(cb: CallbackQuery) -> None:
     if cb.message is None:
         await cb.answer()
         return
-    user = get_user(cb.message.chat.id)
+    chat_id = cb.message.chat.id
+    user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
     if user is None:
         await cb.answer("Сначала /start", show_alert=True)
         return
@@ -944,7 +980,11 @@ async def on_keywords_done(cb: CallbackQuery) -> None:
     if cb.message is None:
         await cb.answer()
         return
-    user = get_user(cb.message.chat.id)
+    chat_id = cb.message.chat.id
+    user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
     uid = cb.from_user.id if cb.from_user else 0
     if user is None:
         await cb.answer("Сначала /start", show_alert=True)
@@ -1095,7 +1135,9 @@ async def on_any_text(msg: Message) -> None:
             parse_mode=ParseMode.HTML,
         )
         return
-    user = get_user(msg.chat.id)
+    chat_id = msg.chat.id
+    _maybe_refresh_username(chat_id, msg.from_user)
+    user = get_user(chat_id)
     uid = _actor_user_id(msg)
     hint = (
         "Пиши сюда не нужно — всё через кнопки в меню.\n"

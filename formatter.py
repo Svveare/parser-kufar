@@ -76,8 +76,14 @@ def format_status(user: dict) -> str:
             "В главном меню нажми <b>«Включить рассылку»</b> или отправь <code>/start</code>."
         )
 
+    un = (user.get("username") or "").strip()
+    username_line = (
+        f"<b>Username:</b> @{_esc(un)}\n" if un else "<b>Username:</b> не задан\n"
+    )
+
     return (
         f"<b>Статус подписки:</b> {active}\n"
+        f"{username_line}"
         f"<b>Тип пользователя:</b> {role}\n"
         f"<b>VIP до:</b> {vip_until_text}\n"
         f"<b>Макс. цена:</b> {max_price} р.\n"
