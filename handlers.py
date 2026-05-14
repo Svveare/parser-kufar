@@ -7,6 +7,14 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import ADMIN_IDS, DEVICE_CATALOG, MAX_PRICE_PRESETS, VIP_PRICE_USD
+from goods_tree import (
+    APPLE_LINES,
+    GOODS_PER_PAGE,
+    LINE_BASIC,
+    LINE_LABELS,
+    LINE_MAX,
+    LINE_PRO,
+)
 from db import (
     add_user,
     clear_market_prices,
@@ -28,6 +36,148 @@ log = logging.getLogger(__name__)
 router = Router()
 PER_PAGE = 8
 ADM_USERS_PER_PAGE = 6
+
+_GOODS_CRUMB = "📦 <b>Товары</b>"
+
+
+def _max_keyword_slots(user: dict) -> int:
+    return 9999 if user.get("role") == "vip" else 5
+
+
+def _goods_category_text() -> str:
+    return (
+        f"{_GOODS_CRUMB}\n\n"
+        "Выберите <b>категорию</b>.\n\n"
+        "<i>Сейчас доступны мобильные устройства; остальное — в разработке.</i>"
+    )
+
+
+def _goods_category_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Мобильные устройства", callback_data="goods:m")],
+            [
+                InlineKeyboardButton(text="💻 Ноутбуки (скоро)", callback_data="goods:soon:lap"),
+                InlineKeyboardButton(text="📦 Другое (скоро)", callback_data="goods:soon:oth"),
+            ],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:home")],
+        ]
+    )
+
+
+def _goods_mobile_brands_text() -> str:
+    return (
+        f"{_GOODS_CRUMB} › <b>Мобильные</b>\n\n"
+        "Выберите <b>производителя</b>."
+    )
+
+
+def _goods_mobile_brands_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Apple", callback_data="goods:a"),
+                InlineKeyboardButton(text="Samsung", callback_data="goods:s"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="goods:h")],
+        ]
+    )
+
+
+def _goods_samsung_text() -> str:
+    return (
+        f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Samsung</b>\n\n"
+        "Серии <b>Galaxy S</b>, <b>A</b> и другие появятся в следующих версиях.\n"
+        "Сейчас поиск Kufar и фильтры заточены под <b>iPhone</b> — выберите Apple или полный список моделей."
+    )
+
+
+def _goods_apple_lines_text() -> str:
+    return (
+        f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Apple</b>\n\n"
+        "Выберите <b>линейку</b>, затем отметьте модели."
+    )
+
+
+def _goods_apple_lines_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_BASIC]}", callback_data=f"gt:{LINE_BASIC}:p:0"),
+                InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_PRO]}", callback_data=f"gt:{LINE_PRO}:p:0"),
+            ],
+            [
+                InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_MAX]}", callback_data=f"gt:{LINE_MAX}:p:0"),
+            ],
+            [
+                InlineKeyboardButton(text="📋 Все модели списком", callback_data="goods:w"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="goods:m")],
+        ]
+    )
+
+
+def _goods_samsung_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="goods:m")],
+        ]
+    )
+
+
+def _goods_line_pick_text(line_slug: str) -> str:
+    title = LINE_LABELS.get(line_slug, line_slug)
+    return (
+        f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Apple</b> › <b>{title}</b>\n\n"
+        "Нажмите на модель — <b>вкл/выкл</b>.\n"
+        f"Лимит для обычного пользователя: до {_max_keyword_slots({'role': 'regular'})} позиций.\n"
+        "Ниже — <b>Готово</b>, возврат к линейкам или в меню."
+    )
+
+
+def _goods_line_keyboard(user: dict, line_slug: str, page: int) -> InlineKeyboardMarkup | None:
+    models = APPLE_LINES.get(line_slug)
+    if not models:
+        return None
+    total_pages = max(1, (len(models) + GOODS_PER_PAGE - 1) // GOODS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * GOODS_PER_PAGE
+    chunk = models[start : start + GOODS_PER_PAGE]
+    selected = {k.strip().lower() for k in (user.get("keywords") or []) if k.strip()}
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(chunk), 2):
+        row: list[InlineKeyboardButton] = []
+        for j in range(2):
+            if i + j >= len(chunk):
+                continue
+            global_idx = start + i + j
+            item = chunk[i + j]
+            mark = "✅ " if item.lower() in selected else ""
+            row.append(
+                InlineKeyboardButton(
+                    text=f"{mark}{item}",
+                    callback_data=f"gt:{line_slug}:t:{global_idx}",
+                )
+            )
+        if row:
+            rows.append(row)
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"gt:{line_slug}:p:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data=f"gt:{line_slug}:x:0"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"gt:{line_slug}:p:{page + 1}"))
+    rows.append(nav)
+    rows.append(
+        [
+            InlineKeyboardButton(text="Готово ✅", callback_data="kw:done"),
+            InlineKeyboardButton(text="⬅️ К линейкам", callback_data="goods:a"),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _is_admin(user_id: int) -> bool:
@@ -242,7 +392,7 @@ def _main_menu_keyboard(*, is_admin: bool, user: dict | None = None) -> InlineKe
         [
             [
                 InlineKeyboardButton(text="📊 Статус", callback_data="nav:status"),
-                InlineKeyboardButton(text="📱 Устройства", callback_data="nav:devices"),
+                InlineKeyboardButton(text="📦 Товары", callback_data="nav:goods"),
             ],
             [
                 InlineKeyboardButton(text="💰 Макс. цена", callback_data="nav:price"),
@@ -458,11 +608,11 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             await cb.answer()
             return
 
-        if data == "nav:devices":
+        if data in ("nav:goods", "nav:devices"):
             await _safe_edit_message(
                 cb,
-                _build_keywords_text(user),
-                reply_markup=_keywords_keyboard(user, page=0),
+                _goods_category_text(),
+                reply_markup=_goods_category_keyboard(),
             )
             await cb.answer()
             return
@@ -555,6 +705,169 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
             pass
 
 
+@router.callback_query(lambda c: (c.data or "").startswith("goods:"))
+async def on_goods_callback(cb: CallbackQuery) -> None:
+    if cb.message is None:
+        await cb.answer()
+        return
+    chat_id = cb.message.chat.id
+    data = (cb.data or "").strip()
+    user = get_user(chat_id)
+
+    if user is None:
+        await cb.answer("Сначала /start", show_alert=True)
+        return
+
+    try:
+        if data == "goods:h":
+            await _safe_edit_message(
+                cb,
+                _goods_category_text(),
+                reply_markup=_goods_category_keyboard(),
+            )
+            await cb.answer()
+            return
+
+        if data == "goods:m":
+            await _safe_edit_message(
+                cb,
+                _goods_mobile_brands_text(),
+                reply_markup=_goods_mobile_brands_keyboard(),
+            )
+            await cb.answer()
+            return
+
+        if data == "goods:s":
+            await _safe_edit_message(
+                cb,
+                _goods_samsung_text(),
+                reply_markup=_goods_samsung_keyboard(),
+            )
+            await cb.answer()
+            return
+
+        if data == "goods:a":
+            await _safe_edit_message(
+                cb,
+                _goods_apple_lines_text(),
+                reply_markup=_goods_apple_lines_keyboard(),
+            )
+            await cb.answer()
+            return
+
+        if data == "goods:w":
+            await _safe_edit_message(
+                cb,
+                _build_keywords_text(user),
+                reply_markup=_keywords_keyboard(user, page=0),
+            )
+            await cb.answer()
+            return
+
+        if data.startswith("goods:soon:"):
+            await cb.answer("Раздел в разработке.", show_alert=True)
+            return
+
+        await cb.answer("Неизвестное действие", show_alert=True)
+    except Exception:
+        log.exception("[GOODS] error data=%s", data)
+        try:
+            await cb.answer("Ошибка", show_alert=True)
+        except Exception:
+            pass
+
+
+@router.callback_query(lambda c: (c.data or "").startswith("gt:"))
+async def on_goods_line_callback(cb: CallbackQuery) -> None:
+    if cb.message is None:
+        await cb.answer()
+        return
+    chat_id = cb.message.chat.id
+    data = (cb.data or "").strip()
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "gt":
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    line_slug, action, arg_raw = parts[1], parts[2], parts[3]
+    if line_slug not in LINE_LABELS:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    if not arg_raw.isdigit():
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    arg = int(arg_raw)
+
+    user = get_user(chat_id)
+    if user is None:
+        await cb.answer("Сначала /start", show_alert=True)
+        return
+
+    models = APPLE_LINES.get(line_slug, ())
+
+    try:
+        if action == "x":
+            await cb.answer()
+            return
+
+        if action == "p":
+            page = arg
+            kb = _goods_line_keyboard(user, line_slug, page)
+            if kb is None:
+                await cb.answer("Нет моделей", show_alert=True)
+                return
+            await _safe_edit_message(
+                cb,
+                _goods_line_pick_text(line_slug),
+                reply_markup=kb,
+            )
+            await cb.answer()
+            return
+
+        if action == "t":
+            idx = arg
+            if idx < 0 or idx >= len(models):
+                await cb.answer("Неверная модель", show_alert=True)
+                return
+            value = models[idx].strip().lower()
+            selected = [k.strip().lower() for k in (user.get("keywords") or []) if k.strip()]
+            max_kw = _max_keyword_slots(user)
+            if value in selected:
+                selected.remove(value)
+            else:
+                if len(selected) >= max_kw:
+                    await cb.answer(
+                        "Лимит: 5 моделей для обычного пользователя.",
+                        show_alert=True,
+                    )
+                    return
+                selected.append(value)
+            update_keywords(chat_id, selected)
+            updated = get_user(chat_id)
+            if updated is None:
+                await cb.answer("Сначала /start", show_alert=True)
+                return
+            page = idx // GOODS_PER_PAGE
+            kb = _goods_line_keyboard(updated, line_slug, page)
+            if kb is None:
+                await cb.answer()
+                return
+            await _safe_edit_message(
+                cb,
+                _goods_line_pick_text(line_slug),
+                reply_markup=kb,
+            )
+            await cb.answer("Обновлено")
+            return
+
+        await cb.answer("Неизвестное действие", show_alert=True)
+    except Exception:
+        log.exception("[GT] error data=%s", data)
+        try:
+            await cb.answer("Ошибка", show_alert=True)
+        except Exception:
+            pass
+
+
 @router.callback_query(lambda c: (c.data or "") == "kw:x")
 async def on_keywords_nav_noop(cb: CallbackQuery) -> None:
     await cb.answer()
@@ -600,13 +913,15 @@ async def on_keywords_toggle(cb: CallbackQuery) -> None:
 
     selected = [k.strip().lower() for k in (user.get("keywords") or []) if k.strip()]
     value = DEVICE_CATALOG[idx].strip().lower()
-    max_keywords = 9999 if user.get("role") == "vip" else 5
-
+    max_kw = _max_keyword_slots(user)
     if value in selected:
         selected.remove(value)
     else:
-        if len(selected) >= max_keywords:
-            await cb.answer("Лимит: 5 устройств для обычного пользователя.", show_alert=True)
+        if len(selected) >= max_kw:
+            await cb.answer(
+                "Лимит: 5 моделей для обычного пользователя.",
+                show_alert=True,
+            )
             return
         selected.append(value)
 
@@ -638,7 +953,7 @@ async def on_keywords_done(cb: CallbackQuery) -> None:
     await _safe_edit_message(
         cb,
         _main_home_text(user, is_new=False)
-        + "\n\n✅ <b>Устройства сохранены.</b> Выбрано: "
+        + "\n\n✅ <b>Товары сохранены.</b> Выбрано: "
         + str(len(selected))
         + (f"\n<code>{', '.join(selected)}</code>" if selected else ""),
         reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid), user=user),
@@ -800,8 +1115,8 @@ def _build_keywords_text(user: dict) -> str:
     role = user.get("role")
     limit = "без лимита" if role == "vip" else "до 5"
     return (
-        "📱 <b>Устройства</b>\n\n"
-        "Нажми на модель — вкл/выкл. Внизу <b>«Готово»</b> — вернуться в меню.\n"
+        f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Apple</b> › <b>Все модели</b>\n\n"
+        "Нажми на модель — вкл/выкл. Внизу <b>«Готово»</b> — в главное меню.\n"
         f"Лимит: <b>{limit}</b>\n\n"
         f"Выбрано: <b>{len(selected)}</b>\n"
         + ("<code>" + ", ".join(selected) + "</code>" if selected else "Пока пусто.")
@@ -840,7 +1155,8 @@ def _keywords_keyboard(user: dict, *, page: int) -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(text="Готово ✅", callback_data="kw:done"),
-            InlineKeyboardButton(text="В меню", callback_data="nav:home"),
+            InlineKeyboardButton(text="⬅️ К линейкам", callback_data="goods:a"),
         ]
     )
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="nav:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
