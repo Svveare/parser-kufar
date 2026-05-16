@@ -16,12 +16,20 @@ from config import (
 log = logging.getLogger(__name__)
 
 _SQLITE_SYNC_NUM = {"OFF": 0, "NORMAL": 1, "FULL": 2, "EXTRA": 3}[SQLITE_SYNCHRONOUS]
+TRIAL_PROMO_CODE = "VIPTRIAL7"
+TRIAL_PROMO_DAYS = 7
 
 
 def _norm_username(username: str | None) -> str:
     if not username:
         return ""
     return username.strip().lstrip("@")[:64]
+
+
+def _norm_promo_code(code: str | None) -> str:
+    if not code:
+        return ""
+    return code.strip().upper()[:64]
 
 
 def _sqlite_path() -> str:
@@ -101,9 +109,25 @@ def init_db() -> None:
             sent_at    INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            code       TEXT PRIMARY KEY,
+            vip_days   INTEGER NOT NULL,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS promo_activations (
+            chat_id INTEGER NOT NULL,
+            code    TEXT    NOT NULL,
+            used_at INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, code),
+            FOREIGN KEY (code) REFERENCES promo_codes(code) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_seen_chat ON seen_ads(chat_id);
         CREATE INDEX IF NOT EXISTS idx_sent_prices_lookup ON sent_prices(chat_id, device_key);
         CREATE INDEX IF NOT EXISTS idx_market_prices_device ON market_prices(device_key);
+        CREATE INDEX IF NOT EXISTS idx_promo_activations_code ON promo_activations(code);
         """
     )
     cols = _table_columns("users")
@@ -117,6 +141,10 @@ def init_db() -> None:
         )
     if "username" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN username TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        "INSERT OR IGNORE INTO promo_codes (code, vip_days, is_active, created_at) VALUES (?, ?, 1, ?)",
+        (TRIAL_PROMO_CODE, TRIAL_PROMO_DAYS, int(time.time())),
+    )
 
 
 def update_user_username(chat_id: int, username: str | None) -> None:
@@ -383,6 +411,31 @@ def set_vip(chat_id: int, *, days: int = VIP_SUBSCRIPTION_DAYS) -> None:
         "UPDATE users SET role = 'vip', vip_until = ? WHERE chat_id = ?",
         (vip_until, chat_id),
     )
+
+
+def redeem_promo_code(chat_id: int, code: str) -> tuple[str, int | None]:
+    promo = _norm_promo_code(code)
+    if not promo:
+        return "not_found", None
+
+    cur = conn.execute(
+        "SELECT vip_days, is_active FROM promo_codes WHERE code = ?",
+        (promo,),
+    )
+    row = cur.fetchone()
+    if row is None or int(row[1] or 0) != 1:
+        return "not_found", None
+
+    try:
+        conn.execute(
+            "INSERT INTO promo_activations (chat_id, code, used_at) VALUES (?, ?, ?)",
+            (chat_id, promo, int(time.time())),
+        )
+    except sqlite3.IntegrityError:
+        return "already_used", None
+
+    days = max(1, int(row[0] or 0))
+    return "ok", days
 
 
 def revoke_vip(chat_id: int) -> None:

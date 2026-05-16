@@ -4,6 +4,8 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import ADMIN_IDS, DEVICE_CATALOG, MAX_PRICE_PRESETS, VIP_PRICE_USD
@@ -23,6 +25,7 @@ from db import (
     count_users_vip,
     get_user,
     list_users_page,
+    redeem_promo_code,
     revoke_vip,
     set_active,
     set_vip,
@@ -37,6 +40,10 @@ log = logging.getLogger(__name__)
 router = Router()
 PER_PAGE = 8
 ADM_USERS_PER_PAGE = 6
+
+
+class PromoCodeState(StatesGroup):
+    waiting_code = State()
 
 
 def _maybe_refresh_username(chat_id: int, from_user) -> None:
@@ -422,6 +429,8 @@ def _main_home_text(user: dict | None, *, is_new: bool) -> str:
 
 def _main_menu_keyboard(*, is_admin: bool, user: dict | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if user and user.get("active"):
+        rows.append([InlineKeyboardButton(text="⛔ Отписаться", callback_data="nav:stop")])
     if user and not user.get("active"):
         rows.append(
             [InlineKeyboardButton(text="🔔 Включить рассылку", callback_data="nav:resume")],
@@ -443,9 +452,9 @@ def _main_menu_keyboard(*, is_admin: bool, user: dict | None = None) -> InlineKe
         t_bm = "🔥 Ниже рынка (бета)"
         if mode == "below_market":
             t_bm = "🔥 Ниже рынка (бета) ✓"
-        t_ex = "🔄 Только обмен (бета)"
+        t_ex = "🔄 Обмен"
         if mode == "exchange":
-            t_ex = "🔄 Обмен (бета) ✓"
+            t_ex = "🔄 Обмен ✓"
         rows.append(
             [
                 InlineKeyboardButton(text=t_bm, callback_data="nav:vipf:bm"),
@@ -454,9 +463,8 @@ def _main_menu_keyboard(*, is_admin: bool, user: dict | None = None) -> InlineKe
         )
     bottom = [
         InlineKeyboardButton(text="❓ Помощь", callback_data="nav:help"),
+        InlineKeyboardButton(text="🎟 Промокоды", callback_data="nav:promo"),
     ]
-    if user and user.get("active"):
-        bottom.append(InlineKeyboardButton(text="⛔ Отписаться", callback_data="nav:stop"))
     rows.append(bottom)
     if is_admin:
         rows.append([InlineKeyboardButton(text="🔐 Админ-панель", callback_data="nav:admin")])
@@ -465,6 +473,14 @@ def _main_menu_keyboard(*, is_admin: bool, user: dict | None = None) -> InlineKe
 
 def _nav_back_home_button() -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav:home")]
+
+
+def _promo_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="назад", callback_data="nav:home")],
+        ]
+    )
 
 
 def _price_presets_keyboard(user: dict | None) -> InlineKeyboardMarkup:
@@ -528,8 +544,9 @@ def _vip_info_text() -> str:
 
 
 @router.message(CommandStart())
-async def on_start(msg: Message) -> None:
+async def on_start(msg: Message, state: FSMContext) -> None:
     chat_id = msg.chat.id
+    await state.clear()
     un = msg.from_user.username if msg.from_user else None
     is_new = add_user(chat_id, username=un)
     log.info("[START] chat_id=%s new=%s", chat_id, is_new)
@@ -559,7 +576,7 @@ async def on_admin(msg: Message) -> None:
 
 
 @router.callback_query(lambda c: (c.data or "").startswith("nav:"))
-async def on_nav_callback(cb: CallbackQuery) -> None:
+async def on_nav_callback(cb: CallbackQuery, state: FSMContext) -> None:
     if cb.message is None:
         await cb.answer()
         return
@@ -576,6 +593,7 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
 
     try:
         if data == "nav:home":
+            await state.clear()
             if user is None:
                 await _safe_edit_message(
                     cb,
@@ -680,6 +698,16 @@ async def on_nav_callback(cb: CallbackQuery) -> None:
                 reply_markup=_price_presets_keyboard(user),
             )
             await cb.answer("Сохранено")
+            return
+
+        if data == "nav:promo":
+            await state.set_state(PromoCodeState.waiting_code)
+            await _safe_edit_message(
+                cb,
+                "🎟️ Введите промокод:",
+                reply_markup=_promo_back_keyboard(),
+            )
+            await cb.answer()
             return
 
         if data == "nav:vip":
@@ -1150,11 +1178,52 @@ async def on_admin_callback(cb: CallbackQuery) -> None:
             pass
 
 
+@router.message(PromoCodeState.waiting_code, F.text, ~F.text.startswith("/"))
+async def on_promo_code_text(msg: Message, state: FSMContext) -> None:
+    chat_id = msg.chat.id
+    _maybe_refresh_username(chat_id, msg.from_user)
+    user = get_user(chat_id)
+    if user is None:
+        await state.clear()
+        await msg.answer(
+            "Сначала нажми <code>/start</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    status, days = redeem_promo_code(chat_id, msg.text or "")
+    if status == "ok" and days is not None:
+        set_vip(chat_id, days=days)
+        await state.clear()
+        updated_user = get_user(chat_id)
+        uid = _actor_user_id(msg)
+        await msg.answer(
+            f"✅ Промокод активирован. VIP на <b>{days}</b> дн.",
+            reply_markup=_main_menu_keyboard(is_admin=_is_admin(uid), user=updated_user),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if status == "already_used":
+        await msg.answer(
+            "❌ Этот промокод уже использован. Введите промокод заново:",
+            reply_markup=_promo_back_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await msg.answer(
+        "❌ Такого промокода нет. Введите промокод заново:",
+        reply_markup=_promo_back_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 @router.message(F.text)
 async def on_any_text(msg: Message) -> None:
     if msg.text and msg.text.startswith("/"):
         await msg.answer(
-            "Команды, кроме <code>/start</code> и (для админа) <code>/admin</code>, не используются.\n"
+            "Команды, кроме <code>/start</code>, не используются.\n"
             "Нажми <code>/start</code> — откроется меню с кнопками.",
             parse_mode=ParseMode.HTML,
         )
