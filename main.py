@@ -43,7 +43,7 @@ from kufar_fetch import fetch_ads
 
 log = logging.getLogger("kufar_bot")
 
-# Для VIP-режимов «все айфоны» — не ограничиваем ценой из профиля
+# Для VIP-режимов «все смартфоны из каталога» — не ограничиваем ценой из профиля
 _VIP_SPECIAL_MAX_PRICE = 99_999_999
 last_run_at: dict[int, float] = {}
 

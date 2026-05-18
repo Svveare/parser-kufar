@@ -1,7 +1,7 @@
 """Тесты правил отбора объявлений."""
 import unittest
 
-from filters import is_exchange_ad
+from filters import ad_device_key, is_exchange_ad, matches_filters
 
 
 def _ad(
@@ -56,6 +56,35 @@ class ExchangeAdTests(unittest.TestCase):
     def test_positive_interesuet_obmen(self) -> None:
         ad = _ad(description="интересует обмен на более новую модель")
         self.assertTrue(is_exchange_ad(ad))
+
+
+class SamsungFilterTests(unittest.TestCase):
+    def test_samsung_ultra_short_title_matches_catalog_key(self) -> None:
+        ad = _ad(title="Samsung S23 Ultra", summary="Смартфон")
+        self.assertEqual(ad_device_key(ad), "samsung galaxy s23 ultra")
+
+    def test_samsung_plus_symbol_matches_catalog_key(self) -> None:
+        ad = _ad(title="Galaxy S24+", summary="Смартфон")
+        self.assertEqual(ad_device_key(ad), "samsung galaxy s24 plus")
+
+    def test_samsung_selected_keyword_passes_filters(self) -> None:
+        ad = _ad(title="Samsung Galaxy S25", summary="Смартфон")
+        self.assertTrue(
+            matches_filters(
+                ad,
+                1000,
+                ["samsung galaxy s25"],
+                smart_filtering=True,
+            )
+        )
+
+    def test_samsung_flip_short_title_matches_catalog_key(self) -> None:
+        ad = _ad(title="Z Flip 7", summary="Смартфон")
+        self.assertEqual(ad_device_key(ad), "samsung galaxy z flip 7")
+
+    def test_samsung_fold_compact_title_matches_catalog_key(self) -> None:
+        ad = _ad(title="Samsung zfold6", summary="Смартфон")
+        self.assertEqual(ad_device_key(ad), "samsung galaxy z fold 6")
 
 
 if __name__ == "__main__":

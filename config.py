@@ -80,7 +80,40 @@ DEVICE_CATALOG = [
     "iphone 16 pro max",
     "iphone 17",
     "iphone 17 pro",
-    "iphone 17 pro max"
+    "iphone 17 pro max",
+    "samsung galaxy s20",
+    "samsung galaxy s20 plus",
+    "samsung galaxy s20 ultra",
+    "samsung galaxy s21",
+    "samsung galaxy s21 plus",
+    "samsung galaxy s21 ultra",
+    "samsung galaxy s22",
+    "samsung galaxy s22 plus",
+    "samsung galaxy s22 ultra",
+    "samsung galaxy s23",
+    "samsung galaxy s23 plus",
+    "samsung galaxy s23 ultra",
+    "samsung galaxy s24",
+    "samsung galaxy s24 plus",
+    "samsung galaxy s24 ultra",
+    "samsung galaxy s25",
+    "samsung galaxy s25 plus",
+    "samsung galaxy s25 ultra",
+    "samsung galaxy z flip",
+    "samsung galaxy z flip 5g",
+    "samsung galaxy z flip 3",
+    "samsung galaxy z flip 4",
+    "samsung galaxy z flip 5",
+    "samsung galaxy z flip 6",
+    "samsung galaxy z flip 7",
+    "samsung galaxy z flip 7 fe",
+    "samsung galaxy z fold",
+    "samsung galaxy z fold 2",
+    "samsung galaxy z fold 3",
+    "samsung galaxy z fold 4",
+    "samsung galaxy z fold 5",
+    "samsung galaxy z fold 6",
+    "samsung galaxy z fold 7",
 ]
 
 # Стоп-слова по смыслу объявления: проверяются только в названии (subject),
@@ -125,13 +158,21 @@ DEFAULT_EXCLUDE_TERMS: tuple[str, ...] = (
     "чехлов",
     "шлейф",
     "шлейфы",
-    "экран"
+    "экран",
+    "микрофон"
 )
 
 # В названии или кратких параметрах (summary) должно быть явно про телефон.
 PHONE_REQUIRED_TERMS: tuple[str, ...] = (
     "iphone",
     "айфон",
+    "samsung s",
+    "самсунг s",
+    "galaxy s",
+    "z flip",
+    "z fold",
+    "флип",
+    "фолд",
     "телефон",
     "смартфон",
     "mobile phone",
@@ -148,6 +189,14 @@ NOT_SALE_TERMS: tuple[str, ...] = (
     "срочный выкуп",
 )
 
-KUFAR_QUERY = os.getenv("KUFAR_QUERY", "iphone")
+KUFAR_QUERY = os.getenv(
+    "KUFAR_QUERY",
+    "iphone,samsung galaxy s,samsung galaxy z flip,samsung galaxy z fold",
+)
+KUFAR_QUERIES: tuple[str, ...] = tuple(
+    q.strip()
+    for q in KUFAR_QUERY.split(",")
+    if q.strip()
+) or ("iphone", "samsung galaxy s", "samsung galaxy z flip", "samsung galaxy z fold")
 KUFAR_REGION = int(os.getenv("KUFAR_REGION", "7"))
 KUFAR_SIZE = int(os.getenv("KUFAR_SIZE", "30"))

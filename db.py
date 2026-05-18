@@ -112,6 +112,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS promo_codes (
             code       TEXT PRIMARY KEY,
             vip_days   INTEGER NOT NULL,
+            max_uses   INTEGER NOT NULL DEFAULT 0,
             is_active  INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL
         );
@@ -141,10 +142,14 @@ def init_db() -> None:
         )
     if "username" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN username TEXT NOT NULL DEFAULT ''")
+    promo_cols = _table_columns("promo_codes")
+    if "max_uses" not in promo_cols:
+        conn.execute("ALTER TABLE promo_codes ADD COLUMN max_uses INTEGER NOT NULL DEFAULT 0")
     conn.execute(
-        "INSERT OR IGNORE INTO promo_codes (code, vip_days, is_active, created_at) VALUES (?, ?, 1, ?)",
+        "INSERT OR IGNORE INTO promo_codes (code, vip_days, max_uses, is_active, created_at) VALUES (?, ?, 0, 1, ?)",
         (TRIAL_PROMO_CODE, TRIAL_PROMO_DAYS, int(time.time())),
     )
+    _cleanup_used_up_promo_codes()
 
 
 def update_user_username(chat_id: int, username: str | None) -> None:
@@ -226,6 +231,7 @@ def count_users_active() -> int:
 
 
 def count_users_vip() -> int:
+    _expire_all_vip()
     now = int(time.time())
     cur = conn.execute(
         "SELECT COUNT(*) FROM users WHERE role = 'vip' AND vip_until > ?",
@@ -235,6 +241,7 @@ def count_users_vip() -> int:
 
 
 def list_users_page(*, offset: int, limit: int) -> list[dict]:
+    _expire_all_vip()
     cur = conn.execute(
         "SELECT chat_id, active, role, vip_until, max_price, keywords, sent_count, created_at, "
         "vip_feed_mode, username FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
@@ -299,6 +306,13 @@ def update_keywords(chat_id: int, keywords: list[str]) -> None:
     conn.execute(
         "UPDATE users SET keywords = ? WHERE chat_id = ?",
         (",".join(cleaned), chat_id),
+    )
+
+
+def reset_user_filters(chat_id: int) -> None:
+    conn.execute(
+        "UPDATE users SET max_price = ?, keywords = ? WHERE chat_id = ?",
+        (DEFAULT_MAX_PRICE, ",".join(DEFAULT_KEYWORDS), chat_id),
     )
 
 
@@ -414,16 +428,22 @@ def set_vip(chat_id: int, *, days: int = VIP_SUBSCRIPTION_DAYS) -> None:
 
 
 def redeem_promo_code(chat_id: int, code: str) -> tuple[str, int | None]:
+    _cleanup_used_up_promo_codes()
     promo = _norm_promo_code(code)
     if not promo:
         return "not_found", None
 
     cur = conn.execute(
-        "SELECT vip_days, is_active FROM promo_codes WHERE code = ?",
+        "SELECT vip_days, is_active, max_uses FROM promo_codes WHERE code = ?",
         (promo,),
     )
     row = cur.fetchone()
     if row is None or int(row[1] or 0) != 1:
+        return "not_found", None
+
+    max_uses = int(row[2] or 0)
+    if max_uses > 0 and _promo_uses_count(promo) >= max_uses:
+        conn.execute("DELETE FROM promo_codes WHERE code = ?", (promo,))
         return "not_found", None
 
     try:
@@ -435,30 +455,92 @@ def redeem_promo_code(chat_id: int, code: str) -> tuple[str, int | None]:
         return "already_used", None
 
     days = max(1, int(row[0] or 0))
+    if max_uses > 0 and _promo_uses_count(promo) >= max_uses:
+        conn.execute("DELETE FROM promo_codes WHERE code = ?", (promo,))
     return "ok", days
+
+
+def create_promo_code(code: str, *, vip_days: int, max_uses: int) -> bool:
+    promo = _norm_promo_code(code)
+    if not promo:
+        return False
+    try:
+        conn.execute(
+            "INSERT INTO promo_codes (code, vip_days, max_uses, is_active, created_at) "
+            "VALUES (?, ?, ?, 1, ?)",
+            (promo, max(1, int(vip_days)), max(0, int(max_uses)), int(time.time())),
+        )
+    except sqlite3.IntegrityError:
+        return False
+    return True
+
+
+def list_active_promo_codes() -> list[dict]:
+    _cleanup_used_up_promo_codes()
+    cur = conn.execute(
+        "SELECT code, vip_days, max_uses, created_at FROM promo_codes WHERE is_active = 1 ORDER BY created_at DESC"
+    )
+    rows = []
+    for code, vip_days, max_uses, created_at in cur.fetchall():
+        uses = _promo_uses_count(code)
+        rows.append(
+            {
+                "code": code,
+                "vip_days": int(vip_days or 0),
+                "max_uses": int(max_uses or 0),
+                "uses": uses,
+                "created_at": int(created_at or 0),
+            }
+        )
+    return rows
 
 
 def revoke_vip(chat_id: int) -> None:
     conn.execute(
-        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal' "
+        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal', "
+        "max_price = ?, keywords = ? "
         "WHERE chat_id = ?",
-        (chat_id,),
+        (DEFAULT_MAX_PRICE, ",".join(DEFAULT_KEYWORDS), chat_id),
     )
 
 
 def _expire_vip(chat_id: int) -> None:
     now = int(time.time())
     conn.execute(
-        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal' "
+        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal', "
+        "max_price = ?, keywords = ? "
         "WHERE chat_id = ? AND role = 'vip' AND vip_until > 0 AND vip_until < ?",
-        (chat_id, now),
+        (DEFAULT_MAX_PRICE, ",".join(DEFAULT_KEYWORDS), chat_id, now),
     )
 
 
 def _expire_all_vip() -> None:
     now = int(time.time())
     conn.execute(
-        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal' "
+        "UPDATE users SET role = 'regular', vip_until = 0, vip_feed_mode = 'normal', "
+        "max_price = ?, keywords = ? "
         "WHERE role = 'vip' AND vip_until > 0 AND vip_until < ?",
-        (now,),
+        (DEFAULT_MAX_PRICE, ",".join(DEFAULT_KEYWORDS), now),
+    )
+
+
+def _promo_uses_count(code: str) -> int:
+    cur = conn.execute(
+        "SELECT COUNT(*) FROM promo_activations WHERE code = ?",
+        (_norm_promo_code(code),),
+    )
+    return int(cur.fetchone()[0])
+
+
+def _cleanup_used_up_promo_codes() -> None:
+    conn.execute(
+        """
+        DELETE FROM promo_codes
+        WHERE max_uses > 0
+          AND (
+              SELECT COUNT(*)
+              FROM promo_activations
+              WHERE promo_activations.code = promo_codes.code
+          ) >= max_uses
+        """
     )

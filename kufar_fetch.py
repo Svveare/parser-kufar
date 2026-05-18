@@ -11,7 +11,7 @@ import aiohttp
 from config import (
     KUFAR_FETCH_RETRIES,
     KUFAR_FETCH_RETRY_DELAY,
-    KUFAR_QUERY,
+    KUFAR_QUERIES,
     KUFAR_REGION,
     KUFAR_SIZE,
 )
@@ -121,14 +121,14 @@ def normalize_listing(raw: dict) -> Optional[dict]:
     }
 
 
-async def _fetch_search(session: aiohttp.ClientSession) -> list[dict]:
+async def _fetch_search(session: aiohttp.ClientSession, query: str) -> list[dict]:
     params = {
         "lang": "ru",
         "size": str(KUFAR_SIZE),
         "sort": "lst.d",
         "rgn": str(KUFAR_REGION),
         "cur": "BYR",
-        "query": KUFAR_QUERY,
+        "query": query,
     }
     last_err: str | None = None
     for attempt in range(1, KUFAR_FETCH_RETRIES + 1):
@@ -139,9 +139,9 @@ async def _fetch_search(session: aiohttp.ClientSession) -> list[dict]:
                 if r.status >= 500 or r.status == 429:
                     body = (await r.text())[:200]
                     last_err = f"status={r.status} {body}"
-                    log.warning("[KUFAR] search %s (попытка %s/%s)", last_err, attempt, KUFAR_FETCH_RETRIES)
+                    log.warning("[KUFAR] search query=%r %s (попытка %s/%s)", query, last_err, attempt, KUFAR_FETCH_RETRIES)
                 elif r.status != 200:
-                    log.error("[KUFAR] search status=%s body=%s", r.status, (await r.text())[:300])
+                    log.error("[KUFAR] search query=%r status=%s body=%s", query, r.status, (await r.text())[:300])
                     return []
                 else:
                     data = await r.json()
@@ -149,7 +149,8 @@ async def _fetch_search(session: aiohttp.ClientSession) -> list[dict]:
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             last_err = repr(e)
             log.warning(
-                "[KUFAR] search сеть: %s (попытка %s/%s)",
+                "[KUFAR] search query=%r сеть: %s (попытка %s/%s)",
+                query,
                 last_err,
                 attempt,
                 KUFAR_FETCH_RETRIES,
@@ -157,7 +158,7 @@ async def _fetch_search(session: aiohttp.ClientSession) -> list[dict]:
         if attempt < KUFAR_FETCH_RETRIES:
             await asyncio.sleep(KUFAR_FETCH_RETRY_DELAY * attempt)
     if last_err:
-        log.error("[KUFAR] search не удался после %s попыток: %s", KUFAR_FETCH_RETRIES, last_err)
+        log.error("[KUFAR] search query=%r не удался после %s попыток: %s", query, KUFAR_FETCH_RETRIES, last_err)
     return []
 
 
@@ -207,7 +208,16 @@ async def fetch_ads(*, with_description: bool = True) -> list[dict]:
     async with aiohttp.ClientSession(
         headers=DEFAULT_HEADERS, connector=connector
     ) as session:
-        raw_ads = await _fetch_search(session)
+        raw_ads: list[dict] = []
+        seen_ids: set[str] = set()
+        for query in KUFAR_QUERIES:
+            for raw in await _fetch_search(session, query):
+                raw_id = str(raw.get("ad_id") or raw.get("ad_link") or "")
+                if raw_id and raw_id in seen_ids:
+                    continue
+                if raw_id:
+                    seen_ids.add(raw_id)
+                raw_ads.append(raw)
         log.info("[KUFAR] сырых объявлений: %d", len(raw_ads))
 
         ads: list[dict] = []

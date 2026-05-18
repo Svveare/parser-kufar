@@ -93,6 +93,42 @@ def is_new_phone_ad(ad: dict) -> bool:
     return any(t in headline for t in NEW_PHONE_TERMS)
 
 
+def _catalog_match_terms(device: str) -> tuple[str, ...]:
+    key = re.sub(r"\s+", " ", normalize(device).strip())
+    terms = {key}
+    if key.startswith("samsung galaxy "):
+        short = key.removeprefix("samsung galaxy ").strip()
+        terms.add(f"galaxy {short}")
+        terms.add(f"samsung {short}")
+        terms.add(short)
+        if short.endswith(" plus"):
+            plus_short = short.removesuffix(" plus").strip() + "+"
+            terms.add(plus_short)
+            terms.add(f"galaxy {plus_short}")
+            terms.add(f"samsung galaxy {plus_short}")
+            terms.add(f"samsung {plus_short}")
+        if short.startswith("z flip"):
+            flip_short = short.removeprefix("z ").strip()
+            terms.add(flip_short)
+            terms.add(f"samsung {flip_short}")
+            terms.add(f"galaxy {flip_short}")
+            terms.add(short.replace(" ", ""))
+            terms.add(flip_short.replace(" ", ""))
+        if short.startswith("z fold"):
+            fold_short = short.removeprefix("z ").strip()
+            terms.add(fold_short)
+            terms.add(f"samsung {fold_short}")
+            terms.add(f"galaxy {fold_short}")
+            terms.add(short.replace(" ", ""))
+            terms.add(fold_short.replace(" ", ""))
+    return tuple(sorted(terms, key=len, reverse=True))
+
+
+def _contains_device_term(text: str, term: str) -> bool:
+    pattern = rf"(?<![a-zа-я0-9]){re.escape(term)}(?![a-zа-я0-9])"
+    return re.search(pattern, text) is not None
+
+
 def ad_device_key(ad: dict) -> str | None:
     """
     Нормализованный ключ устройства из каталога.
@@ -100,14 +136,13 @@ def ad_device_key(ad: dict) -> str | None:
     не превращался в 'iphone 12'.
     """
     full_text = ad_full_text(ad)
-    normalized_catalog = [
-        re.sub(r"\s+", " ", normalize(k).strip())
-        for k in DEVICE_CATALOG
-        if normalize(k).strip()
-    ]
-    if not normalized_catalog:
-        return None
-    matched = [kw for kw in normalized_catalog if kw in full_text]
+    matched: list[str] = []
+    for device in DEVICE_CATALOG:
+        key = re.sub(r"\s+", " ", normalize(device).strip())
+        if not key:
+            continue
+        if any(_contains_device_term(full_text, term) for term in _catalog_match_terms(key)):
+            matched.append(key)
     if not matched:
         return None
     matched.sort(key=len, reverse=True)

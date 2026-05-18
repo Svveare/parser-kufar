@@ -65,9 +65,9 @@ def format_status(user: dict) -> str:
     if user.get("role") == "vip":
         mode = user.get("vip_feed_mode") or "normal"
         if mode == "below_market":
-            vip_feed = "\n<b>VIP-поток:</b> только ниже рынка (все iPhone)"
+            vip_feed = "\n<b>VIP-поток:</b> только ниже рынка (все смартфоны из каталога)"
         elif mode == "exchange":
-            vip_feed = "\n<b>VIP-поток:</b> только обмен (все iPhone)"
+            vip_feed = "\n<b>VIP-поток:</b> только обмен (все смартфоны из каталога)"
 
     paused = ""
     if not user.get("active"):
@@ -111,6 +111,6 @@ HELP_TEXT = (
     "• <b>Товары</b> и макс. цена — подбор объявлений (фильтры)\n"
     "• VIP — расширение и потоки (см. раздел VIP)\n"
     "• Отписка — в меню; вернуть рассылку — <b>«Включить рассылку»</b> или снова <code>/start</code>\n\n"
-    f"VIP: <b>{VIP_PRICE_USD}$</b> / 30 дней (инструкция в разделе «VIP»)."
+    f"VIP: <b>{VIP_PRICE_USD}$</b> / 30 дней (инструкция в разделе «VIP»)\n."
     f"ℹ️ Подробнее о нашем проекте в канале <a href='https://t.me/kufarsup'>@kufarsup</a>."
 )

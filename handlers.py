@@ -1,4 +1,7 @@
 import logging
+import secrets
+import string
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
@@ -16,6 +19,13 @@ from goods_tree import (
     LINE_LABELS,
     LINE_MAX,
     LINE_PRO,
+    SAMSUNG_LINE_LABELS,
+    SAMSUNG_SERIES_FLIP,
+    SAMSUNG_SERIES_FOLD,
+    SAMSUNG_LINES,
+    SAMSUNG_SERIES_LABELS,
+    SAMSUNG_SERIES_LINES,
+    SAMSUNG_SERIES_S,
 )
 from db import (
     add_user,
@@ -23,7 +33,9 @@ from db import (
     count_users_active,
     count_users_total,
     count_users_vip,
+    create_promo_code,
     get_user,
+    list_active_promo_codes,
     list_users_page,
     redeem_promo_code,
     revoke_vip,
@@ -44,6 +56,15 @@ ADM_USERS_PER_PAGE = 6
 
 class PromoCodeState(StatesGroup):
     waiting_code = State()
+
+
+class CustomPriceState(StatesGroup):
+    waiting_price = State()
+
+
+class AdminPromoState(StatesGroup):
+    waiting_random = State()
+    waiting_manual = State()
 
 
 def _maybe_refresh_username(chat_id: int, from_user) -> None:
@@ -82,6 +103,99 @@ def _max_keyword_slots(user: dict) -> int:
     return 9999 if user.get("role") == "vip" else 5
 
 
+def _is_vip_user(user: dict | None) -> bool:
+    return bool(user and user.get("role") == "vip")
+
+
+def _flatten_groups(groups: dict[str, tuple[str, ...]]) -> list[str]:
+    items: list[str] = []
+    for values in groups.values():
+        items.extend(values)
+    return items
+
+
+def _apple_models() -> list[str]:
+    return _flatten_groups(APPLE_LINES)
+
+
+def _samsung_models() -> list[str]:
+    return _flatten_groups(SAMSUNG_LINES)
+
+
+def _models_for_scope(scope: str) -> list[str]:
+    if scope == "a":
+        return _apple_models()
+    if scope == "s":
+        return _samsung_models()
+    return list(DEVICE_CATALOG)
+
+
+def _model_list_title(scope: str) -> str:
+    if scope == "a":
+        return "Apple › <b>Все модели</b>"
+    if scope == "s":
+        return "Samsung › <b>Все модели</b>"
+    return "<b>Все модели</b>"
+
+
+def _model_list_bulk_callback(scope: str) -> str:
+    if scope == "a":
+        return "bulk:apple"
+    if scope == "s":
+        return "bulk:samsung"
+    return "bulk:all"
+
+
+def _model_list_back_button(scope: str) -> InlineKeyboardButton:
+    if scope == "a":
+        return InlineKeyboardButton(text="⬅️ К линейкам", callback_data="goods:a")
+    if scope == "s":
+        return InlineKeyboardButton(text="⬅️ К сериям", callback_data="goods:s")
+    return InlineKeyboardButton(text="⬅️ К брендам", callback_data="goods:m")
+
+
+def _samsung_series_models(series_slug: str) -> list[str]:
+    items: list[str] = []
+    for line_slug in SAMSUNG_SERIES_LINES.get(series_slug, ()):
+        items.extend(SAMSUNG_LINES.get(line_slug, ()))
+    return items
+
+
+def _samsung_series_for_line(line_slug: str) -> str:
+    for series_slug, line_slugs in SAMSUNG_SERIES_LINES.items():
+        if line_slug in line_slugs:
+            return series_slug
+    return SAMSUNG_SERIES_S
+
+
+def _samsung_line_back_button(line_slug: str) -> InlineKeyboardButton:
+    series_slug = _samsung_series_for_line(line_slug)
+    if series_slug in (SAMSUNG_SERIES_FLIP, SAMSUNG_SERIES_FOLD):
+        return InlineKeyboardButton(text="⬅️ К сериям", callback_data="goods:s")
+    return InlineKeyboardButton(text="⬅️ К линейкам", callback_data=f"sg:{series_slug}")
+
+
+def _select_models(user: dict, models: list[str] | tuple[str, ...]) -> list[str]:
+    selected = [k.strip().lower() for k in (user.get("keywords") or []) if k.strip()]
+    seen = set(selected)
+    for model in models:
+        value = model.strip().lower()
+        if value and value not in seen:
+            selected.append(value)
+            seen.add(value)
+    return selected
+
+
+def _toggle_models(user: dict, models: list[str] | tuple[str, ...]) -> tuple[list[str], bool]:
+    selected = [k.strip().lower() for k in (user.get("keywords") or []) if k.strip()]
+    selected_set = set(selected)
+    model_values = [m.strip().lower() for m in models if m.strip()]
+    model_set = set(model_values)
+    if model_set and model_set.issubset(selected_set):
+        return [k for k in selected if k not in model_set], False
+    return _select_models(user, model_values), True
+
+
 def _goods_category_text() -> str:
     return (
         f"{_GOODS_CRUMB}\n\n"
@@ -110,23 +224,23 @@ def _goods_mobile_brands_text() -> str:
     )
 
 
-def _goods_mobile_brands_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Apple", callback_data="goods:a"),
-                InlineKeyboardButton(text="Samsung", callback_data="goods:s"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="goods:h")],
-        ]
-    )
+def _goods_mobile_brands_keyboard(user: dict | None = None) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text="Apple", callback_data="goods:a"),
+            InlineKeyboardButton(text="Samsung", callback_data="goods:s"),
+        ],
+    ]
+    if _is_vip_user(user):
+        rows.append([InlineKeyboardButton(text="📋 Выбрать все модели", callback_data="bulk:all")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="goods:h")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _goods_samsung_text() -> str:
     return (
         f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Samsung</b>\n\n"
-        "Серии <b>Galaxy S</b>, <b>A</b> и другие появятся в следующих версиях.\n"
-        "Сейчас поиск Kufar и фильтры заточены под <b>iPhone</b> — выберите Apple или полный список моделей."
+        "Выберите <b>серию</b>, затем линейку и модели."
     )
 
 
@@ -137,30 +251,135 @@ def _goods_apple_lines_text() -> str:
     )
 
 
-def _goods_apple_lines_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_BASIC]}", callback_data=f"gt:{LINE_BASIC}:p:0"),
-                InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_PRO]}", callback_data=f"gt:{LINE_PRO}:p:0"),
-            ],
-            [
-                InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_MAX]}", callback_data=f"gt:{LINE_MAX}:p:0"),
-            ],
-            [
-                InlineKeyboardButton(text="📋 Все модели списком", callback_data="goods:w"),
-            ],
+def _goods_apple_lines_keyboard(user: dict | None = None) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_BASIC]}", callback_data=f"gt:{LINE_BASIC}:p:0"),
+            InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_PRO]}", callback_data=f"gt:{LINE_PRO}:p:0"),
+        ],
+        [
+            InlineKeyboardButton(text=f"🍎 {LINE_LABELS[LINE_MAX]}", callback_data=f"gt:{LINE_MAX}:p:0"),
+        ],
+    ]
+    if _is_vip_user(user):
+        rows.append([InlineKeyboardButton(text="📋 Выбрать все iPhone", callback_data="bulk:apple")])
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="📋 Все модели списком", callback_data="goods:w")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="goods:m")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _goods_samsung_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def _goods_samsung_keyboard(user: dict | None = None) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Samsung Galaxy S", callback_data=f"sg:{SAMSUNG_SERIES_S}")],
+        [
+            InlineKeyboardButton(text="Samsung Z Flip", callback_data=f"st:{SAMSUNG_SERIES_FLIP}:p:0"),
+            InlineKeyboardButton(text="Samsung Z Fold", callback_data=f"st:{SAMSUNG_SERIES_FOLD}:p:0"),
+        ],
+    ]
+    if _is_vip_user(user):
+        rows.append([InlineKeyboardButton(text="📋 Выбрать все Samsung", callback_data="bulk:samsung")])
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="📋 Все модели списком", callback_data="goods:sw")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="goods:m")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _samsung_series_text(series_slug: str) -> str:
+    title = SAMSUNG_SERIES_LABELS.get(series_slug, "Samsung")
+    return (
+        f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Samsung</b> › <b>{title}</b>\n\n"
+        "Выберите <b>линейку</b>."
+    )
+
+
+def _samsung_series_keyboard(series_slug: str, user: dict | None = None) -> InlineKeyboardMarkup | None:
+    line_slugs = SAMSUNG_SERIES_LINES.get(series_slug)
+    if not line_slugs:
+        return None
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for line_slug in line_slugs:
+        label = SAMSUNG_LINE_LABELS.get(line_slug, line_slug)
+        if not SAMSUNG_LINES.get(line_slug):
+            continue
+        row.append(InlineKeyboardButton(text=label, callback_data=f"st:{line_slug}:p:0"))
+        if len(row) >= 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    if _is_vip_user(user):
+        rows.append([InlineKeyboardButton(text="📋 Выбрать всю серию", callback_data=f"bulk:ss:{series_slug}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="goods:s")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _samsung_line_pick_text(line_slug: str) -> str:
+    title = SAMSUNG_LINE_LABELS.get(line_slug, line_slug)
+    return (
+        f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Samsung</b> › <b>{title}</b>\n\n"
+        "Нажмите на модель — <b>вкл/выкл</b>.\n"
+        f"Лимит ручного выбора для обычного пользователя: до {_max_keyword_slots({'role': 'regular'})} позиций.\n"
+        "Ниже — <b>Готово</b>, возврат к линейкам или в меню."
+    )
+
+
+def _samsung_line_keyboard(user: dict, line_slug: str, page: int) -> InlineKeyboardMarkup | None:
+    models = SAMSUNG_LINES.get(line_slug)
+    if not models:
+        return None
+    total_pages = max(1, (len(models) + GOODS_PER_PAGE - 1) // GOODS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * GOODS_PER_PAGE
+    chunk = models[start : start + GOODS_PER_PAGE]
+    selected = {k.strip().lower() for k in (user.get("keywords") or []) if k.strip()}
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(chunk), 2):
+        row: list[InlineKeyboardButton] = []
+        for j in range(2):
+            if i + j >= len(chunk):
+                continue
+            global_idx = start + i + j
+            item = chunk[i + j]
+            mark = "✅ " if item.lower() in selected else ""
+            row.append(
+                InlineKeyboardButton(
+                    text=f"{mark}{item}",
+                    callback_data=f"st:{line_slug}:t:{global_idx}",
+                )
+            )
+        if row:
+            rows.append(row)
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"st:{line_slug}:p:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data=f"st:{line_slug}:x:0"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"st:{line_slug}:p:{page + 1}"))
+    rows.append(nav)
+    if _is_vip_user(user):
+        rows.append(
+            [
+                InlineKeyboardButton(text="📋 Выбрать всю линейку", callback_data=f"bulk:sg:{line_slug}"),
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(text="Готово ✅", callback_data="kw:done"),
+            _samsung_line_back_button(line_slug),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _goods_line_pick_text(line_slug: str) -> str:
@@ -168,7 +387,7 @@ def _goods_line_pick_text(line_slug: str) -> str:
     return (
         f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Apple</b> › <b>{title}</b>\n\n"
         "Нажмите на модель — <b>вкл/выкл</b>.\n"
-        f"Лимит для обычного пользователя: до {_max_keyword_slots({'role': 'regular'})} позиций.\n"
+        f"Лимит ручного выбора для обычного пользователя: до {_max_keyword_slots({'role': 'regular'})} позиций.\n"
         "Ниже — <b>Готово</b>, возврат к линейкам или в меню."
     )
 
@@ -208,6 +427,12 @@ def _goods_line_keyboard(user: dict, line_slug: str, page: int) -> InlineKeyboar
     if page < total_pages - 1:
         nav.append(InlineKeyboardButton(text="➡️", callback_data=f"gt:{line_slug}:p:{page + 1}"))
     rows.append(nav)
+    if _is_vip_user(user):
+        rows.append(
+            [
+                InlineKeyboardButton(text="📋 Выбрать всю линейку", callback_data=f"bulk:ap:{line_slug}"),
+            ]
+        )
     rows.append(
         [
             InlineKeyboardButton(text="Готово ✅", callback_data="kw:done"),
@@ -274,6 +499,7 @@ def _admin_main_keyboard() -> InlineKeyboardMarkup:
                     callback_data="adm:mp",
                 ),
             ],
+            [InlineKeyboardButton(text="🎟 Добавить промокод", callback_data="adm:promo")],
             [InlineKeyboardButton(text="🔄 Обновить панель", callback_data="adm:h")],
             [InlineKeyboardButton(text="👤 К меню бота", callback_data="nav:home")],
         ]
@@ -387,6 +613,46 @@ def _admin_market_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _admin_promos_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Посмотреть существующие промокоды", callback_data="adm:promo:list")],
+            [
+                InlineKeyboardButton(text="🎲 Добавить случайно", callback_data="adm:promo:random"),
+                InlineKeyboardButton(text="✍️ Добавить вручную", callback_data="adm:promo:manual"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:h")],
+        ]
+    )
+
+
+def _admin_promos_text() -> str:
+    return (
+        "🎟 <b>Промокоды</b>\n\n"
+        "Выберите действие ниже."
+    )
+
+
+def _promo_codes_list_text() -> str:
+    promos = list_active_promo_codes()
+    if not promos:
+        return "🎟 <b>Промокоды</b>\n\nАктуальных промокодов нет."
+    lines = ["🎟 <b>Актуальные промокоды</b>", ""]
+    for p in promos:
+        max_uses = int(p.get("max_uses") or 0)
+        uses = int(p.get("uses") or 0)
+        limit = "без лимита" if max_uses <= 0 else f"{uses}/{max_uses}"
+        lines.append(
+            f"<code>{escape(str(p.get('code') or ''))}</code> — VIP {int(p.get('vip_days') or 0)} дн. · активации: {limit}"
+        )
+    return "\n".join(lines)
+
+
+def _generate_promo_code() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(16))
+
+
 def _main_home_text(user: dict | None, *, is_new: bool) -> str:
     if user is None:
         return "Нажми <code>/start</code>, чтобы зарегистрироваться."
@@ -408,20 +674,20 @@ def _main_home_text(user: dict | None, *, is_new: bool) -> str:
         if mode == "below_market":
             lines += [
                 "",
-                "🔥 <b>VIP-поток:</b> только объявления ниже средней цены по рынку (все iPhone). "
+                "🔥 <b>VIP-поток:</b> только объявления ниже средней цены по рынку (все смартфоны из каталога). "
                 "Повторное нажатие кнопки — выключить.",
             ]
         elif mode == "exchange":
             lines += [
                 "",
-                "🔄 <b>VIP-поток:</b> только объявления про обмен (все iPhone). "
+                "🔄 <b>VIP-поток:</b> только объявления про обмен (все смартфоны из каталога). "
                 "Повторное нажатие кнопки — выключить.",
             ]
         else:
             lines += [
                 "",
                 "⭐ <b>VIP:</b> дополнительно можно включить потоки «ниже рынка» или «только обмен» "
-                "(все iPhone, не только выбранные модели) — кнопками ниже.",
+                "(все смартфоны из каталога, не только выбранные модели) — кнопками ниже.",
             ]
     lines += ["", "Навигация — <b>кнопками</b>. Пропало меню — <code>/start</code>."]
     return "\n".join(lines)
@@ -495,6 +761,8 @@ def _price_presets_keyboard(user: dict | None) -> InlineKeyboardMarkup:
             row = []
     if row:
         rows.append(row)
+    if _is_vip_user(user):
+        rows.append([InlineKeyboardButton(text="🎯 Своя цена", callback_data="nav:price:custom")])
     rows.append(_nav_back_home_button())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -539,7 +807,7 @@ def _vip_info_text() -> str:
         "По оплате напишите: @manohio\n"
         "После оплаты админ активирует VIP вручную.\n\n"
         "С VIP доступны бета-потоки: <b>ниже рынка</b> и <b>только обмен</b> "
-        "(все iPhone с листинга, не только выбранные модели) — кнопками в главном меню."
+        "(все смартфоны из каталога, не только выбранные модели) — кнопками в главном меню."
     )
 
 
@@ -560,7 +828,8 @@ async def on_start(msg: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("admin"))
-async def on_admin(msg: Message) -> None:
+async def on_admin(msg: Message, state: FSMContext) -> None:
+    await state.clear()
     uid = _actor_user_id(msg)
     if not _is_admin(uid):
         await msg.answer(
@@ -652,9 +921,9 @@ async def on_nav_callback(cb: CallbackQuery, state: FSMContext) -> None:
                 reply_markup=_main_menu_keyboard(is_admin=is_admin, user=user),
             )
             hint = (
-                "Только ниже рынка (все iPhone)"
+                "Только ниже рынка (все смартфоны из каталога)"
                 if new_mode == "below_market"
-                else ("Только обмен (все iPhone)" if new_mode == "exchange" else "Обычная рассылка")
+                else ("Только обмен (все смартфоны из каталога)" if new_mode == "exchange" else "Обычная рассылка")
             )
             await cb.answer(hint)
             return
@@ -679,10 +948,24 @@ async def on_nav_callback(cb: CallbackQuery, state: FSMContext) -> None:
             return
 
         if data == "nav:price":
+            await state.clear()
             await _safe_edit_message(
                 cb,
                 _price_screen_text(user),
                 reply_markup=_price_presets_keyboard(user),
+            )
+            await cb.answer()
+            return
+
+        if data == "nav:price:custom":
+            if not _is_vip_user(user):
+                await cb.answer("Только для VIP", show_alert=True)
+                return
+            await state.set_state(CustomPriceState.waiting_price)
+            await _safe_edit_message(
+                cb,
+                "🎯 <b>Своя максимальная цена</b>\n\nВведите максимальную цену в рублях одним числом.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[_nav_back_home_button()]),
             )
             await cb.answer()
             return
@@ -759,6 +1042,7 @@ async def on_nav_callback(cb: CallbackQuery, state: FSMContext) -> None:
             if not is_admin:
                 await cb.answer("Нет доступа", show_alert=True)
                 return
+            await state.clear()
             await _safe_edit_message(
                 cb,
                 _admin_home_text(),
@@ -770,6 +1054,99 @@ async def on_nav_callback(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.answer("Неизвестное действие", show_alert=True)
     except Exception:
         log.exception("[NAV] error data=%s", data)
+        try:
+            await cb.answer("Ошибка", show_alert=True)
+        except Exception:
+            pass
+
+
+@router.callback_query(lambda c: (c.data or "").startswith("bulk:"))
+async def on_bulk_select_callback(cb: CallbackQuery) -> None:
+    if cb.message is None:
+        await cb.answer()
+        return
+    chat_id = cb.message.chat.id
+    data = (cb.data or "").strip()
+    parts = data.split(":")
+    user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
+    if user is None:
+        await cb.answer("Сначала /start", show_alert=True)
+        return
+    if not _is_vip_user(user):
+        await cb.answer("Только для VIP", show_alert=True)
+        return
+
+    models: list[str] | tuple[str, ...] = []
+    text = _goods_mobile_brands_text()
+    markup = _goods_mobile_brands_keyboard(user)
+
+    try:
+        if data == "bulk:all":
+            models = DEVICE_CATALOG
+        elif data == "bulk:apple":
+            models = _apple_models()
+            text = _goods_apple_lines_text()
+            markup = _goods_apple_lines_keyboard(user)
+        elif data == "bulk:samsung":
+            models = _samsung_models()
+            text = _goods_samsung_text()
+            markup = _goods_samsung_keyboard(user)
+        elif len(parts) == 3 and parts[1] == "ap" and parts[2] in LINE_LABELS:
+            line_slug = parts[2]
+            models = APPLE_LINES.get(line_slug, ())
+            text = _goods_line_pick_text(line_slug)
+        elif len(parts) == 3 and parts[1] == "ss" and parts[2] in SAMSUNG_SERIES_LABELS:
+            series_slug = parts[2]
+            models = _samsung_series_models(series_slug)
+            kb = _samsung_series_keyboard(series_slug, user)
+            if kb is None:
+                await cb.answer("Серия не найдена", show_alert=True)
+                return
+            text = _samsung_series_text(series_slug)
+            markup = kb
+        elif len(parts) == 3 and parts[1] == "sg" and parts[2] in SAMSUNG_LINE_LABELS:
+            line_slug = parts[2]
+            models = SAMSUNG_LINES.get(line_slug, ())
+            text = _samsung_line_pick_text(line_slug)
+        else:
+            await cb.answer("Неизвестное действие", show_alert=True)
+            return
+
+        if not models:
+            await cb.answer("Нет моделей для выбора", show_alert=True)
+            return
+
+        selected, selected_all = _toggle_models(user, models)
+        update_keywords(chat_id, selected)
+        updated = get_user(chat_id)
+        if updated is None:
+            await cb.answer("Сначала /start", show_alert=True)
+            return
+
+        if data == "bulk:all":
+            markup = _goods_mobile_brands_keyboard(updated)
+        elif data == "bulk:apple":
+            markup = _goods_apple_lines_keyboard(updated)
+        elif data == "bulk:samsung":
+            markup = _goods_samsung_keyboard(updated)
+        elif len(parts) == 3 and parts[1] == "ap" and parts[2] in LINE_LABELS:
+            markup = _goods_line_keyboard(updated, parts[2], 0)
+        elif len(parts) == 3 and parts[1] == "ss" and parts[2] in SAMSUNG_SERIES_LABELS:
+            markup = _samsung_series_keyboard(parts[2], updated)
+        elif len(parts) == 3 and parts[1] == "sg" and parts[2] in SAMSUNG_LINE_LABELS:
+            markup = _samsung_line_keyboard(updated, parts[2], 0)
+        if markup is None:
+            await cb.answer("Нет моделей для выбора", show_alert=True)
+            return
+
+        await _safe_edit_message(cb, text, reply_markup=markup)
+        action = "Выбрано" if selected_all else "Снято"
+        await cb.answer(f"{action} моделей: {len(models)}")
+    except Exception:
+        log.exception("[BULK] error data=%s", data)
         try:
             await cb.answer("Ошибка", show_alert=True)
         except Exception:
@@ -806,7 +1183,7 @@ async def on_goods_callback(cb: CallbackQuery) -> None:
             await _safe_edit_message(
                 cb,
                 _goods_mobile_brands_text(),
-                reply_markup=_goods_mobile_brands_keyboard(),
+                reply_markup=_goods_mobile_brands_keyboard(user),
             )
             await cb.answer()
             return
@@ -815,7 +1192,7 @@ async def on_goods_callback(cb: CallbackQuery) -> None:
             await _safe_edit_message(
                 cb,
                 _goods_samsung_text(),
-                reply_markup=_goods_samsung_keyboard(),
+                reply_markup=_goods_samsung_keyboard(user),
             )
             await cb.answer()
             return
@@ -824,7 +1201,7 @@ async def on_goods_callback(cb: CallbackQuery) -> None:
             await _safe_edit_message(
                 cb,
                 _goods_apple_lines_text(),
-                reply_markup=_goods_apple_lines_keyboard(),
+                reply_markup=_goods_apple_lines_keyboard(user),
             )
             await cb.answer()
             return
@@ -832,8 +1209,17 @@ async def on_goods_callback(cb: CallbackQuery) -> None:
         if data == "goods:w":
             await _safe_edit_message(
                 cb,
-                _build_keywords_text(user),
-                reply_markup=_keywords_keyboard(user, page=0),
+                _build_model_list_text(user, "a"),
+                reply_markup=_model_list_keyboard(user, "a", page=0),
+            )
+            await cb.answer()
+            return
+
+        if data == "goods:sw":
+            await _safe_edit_message(
+                cb,
+                _build_model_list_text(user, "s"),
+                reply_markup=_model_list_keyboard(user, "s", page=0),
             )
             await cb.answer()
             return
@@ -845,6 +1231,124 @@ async def on_goods_callback(cb: CallbackQuery) -> None:
         await cb.answer("Неизвестное действие", show_alert=True)
     except Exception:
         log.exception("[GOODS] error data=%s", data)
+        try:
+            await cb.answer("Ошибка", show_alert=True)
+        except Exception:
+            pass
+
+
+@router.callback_query(lambda c: (c.data or "").startswith("sg:"))
+async def on_samsung_series_callback(cb: CallbackQuery) -> None:
+    if cb.message is None:
+        await cb.answer()
+        return
+    chat_id = cb.message.chat.id
+    user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
+    if user is None:
+        await cb.answer("Сначала /start", show_alert=True)
+        return
+
+    parts = (cb.data or "").strip().split(":")
+    series_slug = parts[1] if len(parts) == 2 else ""
+    kb = _samsung_series_keyboard(series_slug, user)
+    if kb is None:
+        await cb.answer("Неизвестная серия", show_alert=True)
+        return
+    await _safe_edit_message(
+        cb,
+        _samsung_series_text(series_slug),
+        reply_markup=kb,
+    )
+    await cb.answer()
+
+
+@router.callback_query(lambda c: (c.data or "").startswith("st:"))
+async def on_samsung_line_callback(cb: CallbackQuery) -> None:
+    if cb.message is None:
+        await cb.answer()
+        return
+    chat_id = cb.message.chat.id
+    data = (cb.data or "").strip()
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "st":
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    line_slug, action, arg_raw = parts[1], parts[2], parts[3]
+    if line_slug not in SAMSUNG_LINE_LABELS or not arg_raw.isdigit():
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    arg = int(arg_raw)
+
+    user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
+    if user is None:
+        await cb.answer("Сначала /start", show_alert=True)
+        return
+
+    models = SAMSUNG_LINES.get(line_slug, ())
+
+    try:
+        if action == "x":
+            await cb.answer()
+            return
+
+        if action == "p":
+            kb = _samsung_line_keyboard(user, line_slug, arg)
+            if kb is None:
+                await cb.answer("Нет моделей", show_alert=True)
+                return
+            await _safe_edit_message(
+                cb,
+                _samsung_line_pick_text(line_slug),
+                reply_markup=kb,
+            )
+            await cb.answer()
+            return
+
+        if action == "t":
+            idx = arg
+            if idx < 0 or idx >= len(models):
+                await cb.answer("Неверная модель", show_alert=True)
+                return
+            value = models[idx].strip().lower()
+            selected = [k.strip().lower() for k in (user.get("keywords") or []) if k.strip()]
+            max_kw = _max_keyword_slots(user)
+            if value in selected:
+                selected.remove(value)
+            else:
+                if len(selected) >= max_kw:
+                    await cb.answer(
+                        "Лимит: 5 моделей для обычного пользователя.",
+                        show_alert=True,
+                    )
+                    return
+                selected.append(value)
+            update_keywords(chat_id, selected)
+            updated = get_user(chat_id)
+            if updated is None:
+                await cb.answer("Сначала /start", show_alert=True)
+                return
+            page = idx // GOODS_PER_PAGE
+            kb = _samsung_line_keyboard(updated, line_slug, page)
+            if kb is None:
+                await cb.answer()
+                return
+            await _safe_edit_message(
+                cb,
+                _samsung_line_pick_text(line_slug),
+                reply_markup=kb,
+            )
+            await cb.answer("Обновлено")
+            return
+
+        await cb.answer("Неизвестное действие", show_alert=True)
+    except Exception:
+        log.exception("[SAMSUNG] error data=%s", data)
         try:
             await cb.answer("Ошибка", show_alert=True)
         except Exception:
@@ -939,6 +1443,88 @@ async def on_goods_line_callback(cb: CallbackQuery) -> None:
         await cb.answer("Неизвестное действие", show_alert=True)
     except Exception:
         log.exception("[GT] error data=%s", data)
+        try:
+            await cb.answer("Ошибка", show_alert=True)
+        except Exception:
+            pass
+
+
+@router.callback_query(lambda c: (c.data or "").startswith("ml:"))
+async def on_model_list_callback(cb: CallbackQuery) -> None:
+    if cb.message is None:
+        await cb.answer()
+        return
+    chat_id = cb.message.chat.id
+    data = (cb.data or "").strip()
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "ml" or parts[1] not in ("a", "s", "all"):
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    scope, action, arg_raw = parts[1], parts[2], parts[3]
+    if not arg_raw.isdigit():
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    arg = int(arg_raw)
+
+    user = get_user(chat_id)
+    _maybe_refresh_username(chat_id, cb.from_user)
+    if user is not None:
+        user = get_user(chat_id)
+    if user is None:
+        await cb.answer("Сначала /start", show_alert=True)
+        return
+
+    models = _models_for_scope(scope)
+
+    try:
+        if action == "x":
+            await cb.answer()
+            return
+
+        if action == "p":
+            await _safe_edit_message(
+                cb,
+                _build_model_list_text(user, scope),
+                reply_markup=_model_list_keyboard(user, scope, page=arg),
+            )
+            await cb.answer()
+            return
+
+        if action == "t":
+            idx = arg
+            if idx < 0 or idx >= len(models):
+                await cb.answer("Устройство не найдено", show_alert=True)
+                return
+            selected = [k.strip().lower() for k in (user.get("keywords") or []) if k.strip()]
+            value = models[idx].strip().lower()
+            max_kw = _max_keyword_slots(user)
+            if value in selected:
+                selected.remove(value)
+            else:
+                if len(selected) >= max_kw:
+                    await cb.answer(
+                        "Лимит: 5 моделей для обычного пользователя.",
+                        show_alert=True,
+                    )
+                    return
+                selected.append(value)
+            update_keywords(chat_id, selected)
+            updated = get_user(chat_id)
+            if updated is None:
+                await cb.answer("Сначала /start", show_alert=True)
+                return
+            page = idx // PER_PAGE
+            await _safe_edit_message(
+                cb,
+                _build_model_list_text(updated, scope),
+                reply_markup=_model_list_keyboard(updated, scope, page=page),
+            )
+            await cb.answer("Обновлено")
+            return
+
+        await cb.answer("Неизвестное действие", show_alert=True)
+    except Exception:
+        log.exception("[MODEL_LIST] error data=%s", data)
         try:
             await cb.answer("Ошибка", show_alert=True)
         except Exception:
@@ -1051,7 +1637,7 @@ async def on_keywords_done(cb: CallbackQuery) -> None:
 
 
 @router.callback_query(lambda c: (c.data or "").startswith("adm:"))
-async def on_admin_callback(cb: CallbackQuery) -> None:
+async def on_admin_callback(cb: CallbackQuery, state: FSMContext) -> None:
     uid = cb.from_user.id if cb.from_user else 0
     if not _is_admin(uid):
         await cb.answer("Нет доступа", show_alert=True)
@@ -1065,6 +1651,7 @@ async def on_admin_callback(cb: CallbackQuery) -> None:
 
     try:
         if data == "adm:h":
+            await state.clear()
             await _safe_edit_message(
                 cb,
                 _admin_home_text(),
@@ -1082,6 +1669,50 @@ async def on_admin_callback(cb: CallbackQuery) -> None:
                 cb,
                 _admin_stats_text(),
                 reply_markup=_admin_stats_keyboard(),
+            )
+            await cb.answer()
+            return
+
+        if data == "adm:promo":
+            await state.clear()
+            await _safe_edit_message(
+                cb,
+                _admin_promos_text(),
+                reply_markup=_admin_promos_keyboard(),
+            )
+            await cb.answer()
+            return
+
+        if data == "adm:promo:list":
+            await state.clear()
+            await _safe_edit_message(
+                cb,
+                _promo_codes_list_text(),
+                reply_markup=_admin_promos_keyboard(),
+            )
+            await cb.answer()
+            return
+
+        if data == "adm:promo:random":
+            await state.set_state(AdminPromoState.waiting_random)
+            await _safe_edit_message(
+                cb,
+                "🎲 <b>Случайные промокоды</b>\n\n"
+                "Введите количество промокодов и срок VIP в днях через пробел.\n"
+                "Пример: <code>5 7</code>",
+                reply_markup=_admin_promos_keyboard(),
+            )
+            await cb.answer()
+            return
+
+        if data == "adm:promo:manual":
+            await state.set_state(AdminPromoState.waiting_manual)
+            await _safe_edit_message(
+                cb,
+                "✍️ <b>Промокод вручную</b>\n\n"
+                "Введите название, количество использований и срок VIP в днях через пробел.\n"
+                "Пример: <code>SALE2026 10 7</code>",
+                reply_markup=_admin_promos_keyboard(),
             )
             await cb.answer()
             return
@@ -1178,6 +1809,133 @@ async def on_admin_callback(cb: CallbackQuery) -> None:
             pass
 
 
+@router.message(AdminPromoState.waiting_random, F.text, ~F.text.startswith("/"))
+async def on_admin_random_promos_text(msg: Message, state: FSMContext) -> None:
+    uid = _actor_user_id(msg)
+    if not _is_admin(uid):
+        await state.clear()
+        return
+
+    parts = (msg.text or "").strip().split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        await msg.answer(
+            "Введите два числа через пробел: количество промокодов и срок VIP в днях.\n"
+            "Пример: <code>5 7</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    count = int(parts[0])
+    days = int(parts[1])
+    if not 1 <= count <= 100 or not 1 <= days <= 3650:
+        await msg.answer(
+            "Количество должно быть от 1 до 100, срок VIP — от 1 до 3650 дней.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    created: list[str] = []
+    attempts = 0
+    while len(created) < count and attempts < count * 10:
+        attempts += 1
+        code = _generate_promo_code()
+        if create_promo_code(code, vip_days=days, max_uses=1):
+            created.append(code)
+
+    if len(created) != count:
+        await msg.answer("Не удалось создать нужное количество промокодов. Попробуйте ещё раз.")
+        return
+
+    await state.clear()
+    await msg.answer("успешно")
+    await msg.answer(
+        _promo_codes_list_text(),
+        reply_markup=_admin_promos_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(AdminPromoState.waiting_manual, F.text, ~F.text.startswith("/"))
+async def on_admin_manual_promo_text(msg: Message, state: FSMContext) -> None:
+    uid = _actor_user_id(msg)
+    if not _is_admin(uid):
+        await state.clear()
+        return
+
+    parts = (msg.text or "").strip().split()
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        await msg.answer(
+            "Введите название, количество использований и срок VIP в днях через пробел.\n"
+            "Пример: <code>SALE2026 10 7</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    code = parts[0]
+    max_uses = int(parts[1])
+    days = int(parts[2])
+    if not 1 <= max_uses <= 1_000_000 or not 1 <= days <= 3650:
+        await msg.answer(
+            "Количество использований должно быть от 1, срок VIP — от 1 до 3650 дней.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not create_promo_code(code, vip_days=days, max_uses=max_uses):
+        await msg.answer(
+            "Такой промокод уже существует или название пустое. Введите данные заново.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await state.clear()
+    await msg.answer("успешно")
+    await msg.answer(
+        _promo_codes_list_text(),
+        reply_markup=_admin_promos_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(CustomPriceState.waiting_price, F.text, ~F.text.startswith("/"))
+async def on_custom_price_text(msg: Message, state: FSMContext) -> None:
+    chat_id = msg.chat.id
+    _maybe_refresh_username(chat_id, msg.from_user)
+    user = get_user(chat_id)
+    if user is None:
+        await state.clear()
+        await msg.answer("Сначала нажми <code>/start</code>.", parse_mode=ParseMode.HTML)
+        return
+    if not _is_vip_user(user):
+        await state.clear()
+        await msg.answer("Индивидуальная цена доступна только для VIP.", parse_mode=ParseMode.HTML)
+        return
+
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit():
+        await msg.answer(
+            "Введите цену одним числом, например <code>1200</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    price = int(raw)
+    if not 1 <= price <= 10_000_000:
+        await msg.answer(
+            "Цена должна быть от 1 до 10 000 000 р. Введите значение заново.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    update_max_price(chat_id, price)
+    await state.clear()
+    updated = get_user(chat_id)
+    await msg.answer(
+        _price_screen_text(updated),
+        reply_markup=_price_presets_keyboard(updated),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 @router.message(PromoCodeState.waiting_code, F.text, ~F.text.startswith("/"))
 async def on_promo_code_text(msg: Message, state: FSMContext) -> None:
     chat_id = msg.chat.id
@@ -1250,12 +2008,71 @@ def _build_keywords_text(user: dict) -> str:
     role = user.get("role")
     limit = "без лимита" if role == "vip" else "до 5"
     return (
-        f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Apple</b> › <b>Все модели</b>\n\n"
+        f"{_GOODS_CRUMB} › <b>Мобильные</b> › <b>Все модели</b>\n\n"
         "Нажми на модель — вкл/выкл. Внизу <b>«Готово»</b> — в главное меню.\n"
-        f"Лимит: <b>{limit}</b>\n\n"
+        f"Лимит ручного выбора: <b>{limit}</b>\n\n"
         f"Выбрано: <b>{len(selected)}</b>\n"
         + ("<code>" + ", ".join(selected) + "</code>" if selected else "Пока пусто.")
     )
+
+
+def _build_model_list_text(user: dict, scope: str) -> str:
+    selected = user.get("keywords") or []
+    role = user.get("role")
+    limit = "без лимита" if role == "vip" else "до 5"
+    models = _models_for_scope(scope)
+    selected_in_scope = {
+        k.strip().lower()
+        for k in selected
+        if k.strip().lower() in {m.strip().lower() for m in models}
+    }
+    return (
+        f"{_GOODS_CRUMB} › <b>Мобильные</b> › {_model_list_title(scope)}\n\n"
+        "Нажми на модель — вкл/выкл. Внизу <b>«Готово»</b> — в главное меню.\n"
+        f"Лимит ручного выбора: <b>{limit}</b>\n\n"
+        f"Выбрано здесь: <b>{len(selected_in_scope)}</b> из <b>{len(models)}</b>\n"
+        f"Всего выбрано: <b>{len(selected)}</b>"
+    )
+
+
+def _model_list_keyboard(user: dict, scope: str, *, page: int) -> InlineKeyboardMarkup:
+    models = _models_for_scope(scope)
+    total_pages = max(1, (len(models) + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * PER_PAGE
+    chunk = models[start : start + PER_PAGE]
+    selected = {k.strip().lower() for k in (user.get("keywords") or []) if k.strip()}
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(chunk), 2):
+        row: list[InlineKeyboardButton] = []
+        for j in range(2):
+            if i + j >= len(chunk):
+                continue
+            idx = start + i + j
+            item = chunk[i + j]
+            mark = "✅ " if item.lower() in selected else ""
+            row.append(InlineKeyboardButton(text=f"{mark}{item}", callback_data=f"ml:{scope}:t:{idx}"))
+        if row:
+            rows.append(row)
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"ml:{scope}:p:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data=f"ml:{scope}:x:0"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"ml:{scope}:p:{page + 1}"))
+    rows.append(nav)
+    if _is_vip_user(user):
+        rows.append([InlineKeyboardButton(text="📋 Выбрать все модели", callback_data=_model_list_bulk_callback(scope))])
+    rows.append(
+        [
+            InlineKeyboardButton(text="Готово ✅", callback_data="kw:done"),
+            _model_list_back_button(scope),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _keywords_keyboard(user: dict, *, page: int) -> InlineKeyboardMarkup:
@@ -1287,6 +2104,8 @@ def _keywords_keyboard(user: dict, *, page: int) -> InlineKeyboardMarkup:
     if page < total_pages - 1:
         nav.append(InlineKeyboardButton(text="➡️", callback_data=f"kw:page:{page + 1}"))
     rows.append(nav)
+    if _is_vip_user(user):
+        rows.append([InlineKeyboardButton(text="📋 Выбрать все модели", callback_data="bulk:all")])
     rows.append(
         [
             InlineKeyboardButton(text="Готово ✅", callback_data="kw:done"),
