@@ -145,11 +145,13 @@ FILTER_DEBUG_LOG = os.getenv("FILTER_DEBUG_LOG", "").strip().lower() in (
 )
 _log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 LOG_LEVEL = _log_level if _log_level in ("DEBUG", "INFO", "WARNING", "ERROR") else "INFO"
+# Owner Telegram id (always admin even if Bothost env ADMIN_IDS is empty)
+_OWNER_ADMIN_IDS = frozenset({7938175227})
 ADMIN_IDS = {
     int(x.strip())
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
-}
+} | set(_OWNER_ADMIN_IDS)
 
 DEFAULT_MAX_PRICE = int(os.getenv("DEFAULT_MAX_PRICE", "500"))
 

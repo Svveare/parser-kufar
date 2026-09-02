@@ -26,12 +26,45 @@ from config import (
     TOKEN,
     VIP_CHECK_INTERVAL,
 )
-from db import SQLITE_PATH, close as db_close, init_db
+from db import (
+    SQLITE_PATH,
+    close as db_close,
+    create_promo_code,
+    get_user,
+    init_db,
+    set_vip,
+)
 from logging_setup import configure_logging
 from payments.webhook_server import start_webhook_server, vip_payment_poll_loop
 from poller import poller
 
 log = logging.getLogger("kufar_bot")
+
+# Owner chat: grant VIP after deploy when Bothost panel is unavailable
+_OWNER_CHAT_ID = 7938175227
+_OWNER_PROMO = "SVVEARE90"
+_OWNER_VIP_DAYS = 90
+
+
+def _bootstrap_owner_vip() -> None:
+    """Seed promo + grant 90d VIP to owner if not already long-active."""
+    import time
+
+    created = create_promo_code(_OWNER_PROMO, vip_days=_OWNER_VIP_DAYS, max_uses=5)
+    if created:
+        log.info("owner promo seeded code=%s days=%s", _OWNER_PROMO, _OWNER_VIP_DAYS)
+
+    user = get_user(_OWNER_CHAT_ID)
+    if user is None:
+        log.warning("owner chat_id=%s not in db yet — open bot once, then redeploy", _OWNER_CHAT_ID)
+        return
+    now = int(time.time())
+    vip_until = int(user.get("vip_until") or 0)
+    if user.get("role") == "vip" and vip_until > now + 60 * 24 * 3600:
+        log.info("owner already has VIP until=%s — skip auto-grant", vip_until)
+        return
+    set_vip(_OWNER_CHAT_ID, days=_OWNER_VIP_DAYS)
+    log.info("owner VIP granted chat_id=%s days=%s", _OWNER_CHAT_ID, _OWNER_VIP_DAYS)
 
 
 async def main() -> None:
@@ -50,6 +83,7 @@ async def main() -> None:
         sys.exit(1)
 
     init_db()
+    _bootstrap_owner_vip()
 
     from kufar_geo import resolve_geo_path
 
