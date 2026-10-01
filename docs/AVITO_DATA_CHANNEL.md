@@ -29,29 +29,31 @@ Optional overrides:
 - `published_at` — ISO timestamp
 - `category` — mappable to bot `product_category`
 
+The bot enables Avito by default. Set `AVITO_ENABLED=false` to disable it. Users must select a supported city and at least one model before polling starts.
+
 ## Operational requirements
 
 - Documented rate limits and retry policy
 - Feed freshness SLA (e.g. listings no older than N minutes)
 - Incident contact and changelog for schema breaks
-- Staging environment for smoke tests before `AVITO_ENABLED=true`
+- Staging environment for smoke tests before production rollout
 
-## Enable checklist
+## Delivery checklist
 
-1. `AVITO_ENABLED=true` in `.env`, restart bot
-2. Staging: RU user with city, models, notifications on
+1. Ensure the RU user has a supported city, selected models and notifications enabled
+2. Staging: exercise an RU user through the complete city/model/notification flow
 3. Logs: `avito live loaded ads=…`
 4. Optional: `AVITO_SEARCH_URL` or `AVITO_FEED_URL` instead of live
 
 ## Config (Phase 4.0)
 
 ```env
-AVITO_ENABLED=false
+AVITO_ENABLED=true
 AVITO_CHECK_INTERVAL=420
 AVITO_VIP_CHECK_INTERVAL=60
 ```
 
-Set `AVITO_ENABLED=true` only after the checklist below.
+Set `AVITO_ENABLED=false` to turn off Avito polling.
 
 ## Как получить данные (API / фид)
 
@@ -76,7 +78,7 @@ FEED_REFRESH_SECONDS=30
 
 Формат ответа feed — массив `[{...}]` или объект `{"ads": [...]}`. Пример записи: [`geo/avito_feed_sample.json`](geo/avito_feed_sample.json).
 
-Если партнёра ещё нет — оставьте `AVITO_ENABLED=true` + `AVITO_DEV_MOCK=true` для smoke-теста UI и poller.
+Если нужен smoke-тест без сетевых запросов — установите `AVITO_ENABLED=true` + `AVITO_DEV_MOCK=true`.
 
 ## Local dev mock (end-to-end без фида)
 
@@ -92,7 +94,7 @@ AVITO_DEV_MOCK=true
 Шаги в боте:
 
 1. Страна → Россия (возврат на главную; город — кнопка «Город»)
-2. Город → Москва / Смоленск
+2. Город → Москва / Санкт-Петербург / Смоленск (текущий встроенный список)
 3. Товары → модель (например iPhone 15), память
 4. Включить уведомления
 

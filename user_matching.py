@@ -27,34 +27,8 @@ def _is_avito_user(user: dict) -> bool:
     return user_primary_source(user) == SOURCE_AVITO
 
 
-def _catalog_style_filters(user: dict) -> bool:
-    """Catalog-style local filter (Kufar catalog + Avito)."""
-    del user
-    return True
-
-
-def _smart_filtering_for(user: dict) -> bool:
-    """Жёсткий отбор (целый телефон, не продажа, «новый» и т.д.) — только для VIP."""
-    if _catalog_style_filters(user):
-        return False
-    return user.get("role") == "vip"
-
-
-def _basic_filtering_for(user: dict) -> bool:
-    """Для обычных: отсекаем коробки/аксессуары, без остальных VIP-правил."""
-    if _catalog_style_filters(user):
-        return False
-    return user.get("role") != "vip"
-
-
 def _memory_filter_for(user: dict) -> bool:
     return is_phones_category(user.get("product_category"))
-
-
-def _thin_junk_stems_for(user: dict) -> tuple[str, ...]:
-    if _is_avito_user(user):
-        return ()
-    return ()
 
 
 def _avito_junk_reject(ad: dict, user: dict) -> bool:
@@ -96,20 +70,18 @@ def geo_location_matches(ad: dict, user: dict) -> bool:
 
 
 def _passes_base(ad: dict, user: dict, *, max_price: int, skip_new_phone: bool = False) -> bool:
-    catalog_style = _catalog_style_filters(user)
     if not matches_filters(
         ad,
         max_price,
         user["keywords"],
         memory_volumes=user.get("memory_volumes"),
-        smart_filtering=_smart_filtering_for(user),
-        basic_filtering=_basic_filtering_for(user),
+        smart_filtering=False,
+        basic_filtering=False,
         device_filter=True,
         memory_filter=_memory_filter_for(user),
         skip_new_phone=skip_new_phone,
-        company_filter=catalog_style,
-        thin_junk=catalog_style,
-        extra_headline_stems=_thin_junk_stems_for(user),
+        company_filter=True,
+        thin_junk=True,
     ):
         return False
     if _avito_junk_reject(ad, user):
@@ -125,13 +97,12 @@ def _log_reject(ad: dict, user: dict, *, max_price: int, feed_mode: str) -> None
         max_price,
         user["keywords"],
         memory_volumes=user.get("memory_volumes"),
-        smart_filtering=_smart_filtering_for(user),
-        basic_filtering=_basic_filtering_for(user),
+        smart_filtering=False,
+        basic_filtering=False,
         device_filter=True,
         memory_filter=_memory_filter_for(user),
-        company_filter=_catalog_style_filters(user),
-        thin_junk=_catalog_style_filters(user),
-        extra_headline_stems=_thin_junk_stems_for(user),
+        company_filter=True,
+        thin_junk=True,
     )
     if reason:
         log_filter_reject(ad, reason, chat_id=user["chat_id"], feed_mode=feed_mode)

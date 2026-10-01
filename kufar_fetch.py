@@ -1,6 +1,7 @@
 """Загрузка и нормализация объявлений с API Kufar."""
 
 import asyncio
+import heapq
 import json
 import logging
 import re
@@ -19,6 +20,10 @@ from filters import parse_memory_gb_text
 from kufar_catalog import catalog_search_params
 
 log = logging.getLogger(__name__)
+
+
+def _retry_delay(attempt: int) -> float:
+    return min(KUFAR_FETCH_RETRY_DELAY * (2 ** (attempt - 1)), 30.0)
 
 SEARCH_URL = "https://api.kufar.by/search-api/v2/search/rendered-paginated"
 DEFAULT_HEADERS = {
@@ -59,9 +64,13 @@ def _cache_description(link: str, body: str) -> None:
     _description_cache[link] = (time.time(), body)
     if len(_description_cache) <= DESCRIPTION_CACHE_MAX:
         return
-    # Удаляем самые старые записи.
-    oldest = sorted(_description_cache.items(), key=lambda kv: kv[1][0])
-    for key, _ in oldest[: max(1, len(_description_cache) - DESCRIPTION_CACHE_MAX)]:
+    excess = len(_description_cache) - DESCRIPTION_CACHE_MAX
+    oldest = heapq.nsmallest(
+        excess,
+        _description_cache.items(),
+        key=lambda item: item[1][0],
+    )
+    for key, _ in oldest:
         _description_cache.pop(key, None)
 
 
@@ -214,12 +223,12 @@ async def _fetch_search_page(
                         retry_after = r.headers.get("Retry-After")
                         if retry_after:
                             try:
-                                await asyncio.sleep(float(retry_after))
+                                await asyncio.sleep(min(float(retry_after), 60.0))
                                 waited_retry_after = True
                             except ValueError:
                                 pass
                     if attempt < KUFAR_FETCH_RETRIES and not waited_retry_after:
-                        await asyncio.sleep(KUFAR_FETCH_RETRY_DELAY * attempt)
+                        await asyncio.sleep(_retry_delay(attempt))
                     continue
                 elif r.status != 200:
                     log.error(
@@ -241,7 +250,7 @@ async def _fetch_search_page(
                 KUFAR_FETCH_RETRIES,
             )
         if attempt < KUFAR_FETCH_RETRIES:
-            await asyncio.sleep(KUFAR_FETCH_RETRY_DELAY * attempt)
+            await asyncio.sleep(_retry_delay(attempt))
     if last_err:
         log.error(
             "kufar search exhausted query=%r attempts=%s err=%s",

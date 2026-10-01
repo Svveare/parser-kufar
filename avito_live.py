@@ -7,7 +7,7 @@ import logging
 
 import aiohttp
 
-from avito_catalog import live_search_params_from_key
+from avito_catalog import live_search_params_for_model
 from avito_fetch import (
     AVITO_HTTP_HEADERS,
     filter_ads_for_key,
@@ -234,28 +234,39 @@ async def fetch_live_ads_for_key(
     key: FetchKey,
     session: aiohttp.ClientSession,
 ) -> list[dict]:
-    params = live_search_params_from_key(key)
-    if params is None:
+    source, category, geo_a, geo_b, models, _memories = key
+    if source != "avito" or not models:
         return []
-    source, category, geo_a, geo_b, _models, _memories = key
     city_id = str(geo_b or geo_a or "").strip()
     region_id = str(geo_a or city_id).strip()
     cat = category
-    raw_items = await _fetch_live_http(
-        session,
-        params,
-        category=cat,
-        region_id=region_id,
-    )
-    if not raw_items:
-        return []
-    # Переписываем geo/category из ключа — API может не возвращать id.
+    semaphore = asyncio.Semaphore(3)
+
+    async def _fetch_model(model: str) -> list[dict]:
+        params = live_search_params_for_model(key, model)
+        if params is None:
+            return []
+        async with semaphore:
+            return await _fetch_live_http(
+                session,
+                params,
+                category=cat,
+                region_id=region_id,
+            )
+
+    batches = await asyncio.gather(*(_fetch_model(model) for model in models))
     normalized_raw: list[dict] = []
-    for raw in raw_items:
+    seen_ids: set[str] = set()
+    for raw in (item for batch in batches for item in batch):
         raw = dict(raw)
         raw["city_id"] = city_id
         raw["region_id"] = region_id
         raw["category"] = cat
+        item_id = str(raw.get("id") or raw.get("itemId") or raw.get("url") or "")
+        if item_id and item_id in seen_ids:
+            continue
+        if item_id:
+            seen_ids.add(item_id)
         normalized_raw.append(raw)
     matched = filter_ads_for_key(normalized_raw, key)
     out: list[dict] = []

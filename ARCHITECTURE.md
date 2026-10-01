@@ -84,7 +84,7 @@ flowchart LR
 | `users.country` | `by` / `ru` | Страна в UI |
 | `users.primary_source` | `kufar` / `avito` | Адаптер для fetch и `source` в seen/prices |
 
-Сейчас активен poll для `by` + `kufar`. Avito: `AVITO_ENABLED=true` + город; данные — built-in live (default), `AVITO_SEARCH_URL` или `AVITO_FEED_URL` (override).
+Оба трека активны по умолчанию. Avito начинает poll для пользователя из России после выбора поддерживаемого города, модели и включения уведомлений; `AVITO_ENABLED=false` отключает трек. Источник данных — built-in live (default), затем настроенный feed при пустом live-ответе; `AVITO_SEARCH_URL` задаёт внешний search collector.
 
 ### VIP-потоки (`users.vip_feed_mode`)
 

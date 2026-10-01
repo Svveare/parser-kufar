@@ -240,17 +240,24 @@ def _connect() -> sqlite3.Connection:
 
 conn = _connect()
 _db_lock = threading.RLock()
+_sql_metrics = {"queries": 0, "seconds": 0.0}
 
 
 def _execute(sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
     with _db_lock:
-        return conn.execute(sql, params)
+        started = time.perf_counter()
+        try:
+            return conn.execute(sql, params)
+        finally:
+            _sql_metrics["queries"] += 1
+            _sql_metrics["seconds"] += time.perf_counter() - started
 
 
 def _executemany(sql: str, seq: list[tuple]) -> None:
     if not seq:
         return
     with _db_lock:
+        started = time.perf_counter()
         conn.execute("BEGIN")
         try:
             conn.executemany(sql, seq)
@@ -258,6 +265,17 @@ def _executemany(sql: str, seq: list[tuple]) -> None:
         except Exception:
             conn.execute("ROLLBACK")
             raise
+        finally:
+            _sql_metrics["queries"] += 1
+            _sql_metrics["seconds"] += time.perf_counter() - started
+
+
+def sql_metrics_snapshot(*, reset: bool = False) -> tuple[int, float]:
+    with _db_lock:
+        snapshot = (int(_sql_metrics["queries"]), float(_sql_metrics["seconds"]))
+        if reset:
+            _sql_metrics.update(queries=0, seconds=0.0)
+        return snapshot
 
 
 def _executescript(script: str) -> None:
@@ -436,6 +454,9 @@ def init_db() -> None:
         )
     _executescript(
         """
+        CREATE INDEX IF NOT EXISTS idx_market_prices_lookup
+            ON market_prices(device_key, source, sent_at);
+
         CREATE TABLE IF NOT EXISTS referrals (
             referred_chat_id  INTEGER PRIMARY KEY,
             referrer_chat_id  INTEGER NOT NULL,

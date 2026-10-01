@@ -71,6 +71,14 @@ class GeoDbTests(unittest.TestCase):
         self.assertEqual(avg, 400)
         self.assertIsNone(db.avg_market_price("iphone|15", source=SOURCE_AVITO))
 
+    def test_hot_lookup_queries_use_composite_indexes(self) -> None:
+        market_plan = db.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT AVG(price) FROM market_prices "
+            "WHERE device_key = ? AND source = ? AND sent_at >= ?",
+            ("iphone|15", SOURCE_KUFAR, 0),
+        ).fetchall()
+        self.assertIn("idx_market_prices_lookup", " ".join(str(row) for row in market_plan))
+
     def test_update_country_ru_sets_avito_source(self) -> None:
         chat_id = 545454
         db.add_user(chat_id)

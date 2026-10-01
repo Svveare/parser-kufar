@@ -120,7 +120,12 @@ class AvitoAdapterTests(unittest.IsolatedAsyncioTestCase):
                     with patch("marketplace.avito.AVITO_FEED_URL", ""):
                         with patch("marketplace.avito.AVITO_FEED_FILE", str(_FEED_SAMPLE)):
                             with patch("avito_fetch.AVITO_FEED_FILE", str(_FEED_SAMPLE)):
-                                ads = await adapter.fetch_for_key(key)
+                                with patch(
+                                    "marketplace.avito.fetch_live_ads_for_key",
+                                    new_callable=AsyncMock,
+                                    return_value=[],
+                                ):
+                                    ads = await adapter.fetch_for_key(key)
         self.assertEqual(len(ads), 1)
         self.assertIn("iphone 15", ads[0].get("title", "").lower())
 
@@ -277,6 +282,38 @@ class AvitoLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         ads = await fetch_live_ads_for_key(key, session)
         self.assertEqual(len(ads), 1)
         self.assertIn("iphone 15", ads[0]["title"].lower())
+
+    async def test_fetch_live_ads_queries_each_selected_model(self) -> None:
+        payload = json.loads(_LIVE_SAMPLE.read_text(encoding="utf-8"))
+        parsed_items = [
+            parse_live_item(
+                item,
+                city_id="637640",
+                region_id="637640",
+                category="phones",
+            )
+            for item in payload["ads"]
+        ]
+        key = (
+            SOURCE_AVITO,
+            "phones",
+            "637640",
+            "637640",
+            ("iphone 15", "galaxy s24"),
+            ("256",),
+        )
+        with patch(
+            "avito_live._fetch_live_http",
+            new_callable=AsyncMock,
+            side_effect=[parsed_items[:1], parsed_items[1:]],
+        ) as mock_fetch:
+            ads = await fetch_live_ads_for_key(key, MagicMock())
+        self.assertEqual(len(ads), 2)
+        self.assertEqual(mock_fetch.await_count, 2)
+        requested_models = {
+            call.args[1]["q"] for call in mock_fetch.await_args_list
+        }
+        self.assertEqual(requested_models, {"iphone 15", "galaxy s24"})
 
 
 class AvitoSearchFetchTests(unittest.IsolatedAsyncioTestCase):

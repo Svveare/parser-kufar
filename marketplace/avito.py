@@ -89,12 +89,24 @@ class AvitoAdapter:
                 return [NormalizedAd(ad) for ad in ads]
 
             if session is not None:
-                return await _run_live(session)
+                live_ads = await _run_live(session)
+                if live_ads or not (AVITO_FEED_URL or AVITO_FEED_FILE):
+                    return live_ads
+                return [
+                    NormalizedAd(ad)
+                    for ad in await fetch_feed_ads_for_key(key, session)
+                ]
             connector = aiohttp.TCPConnector(limit=4)
             async with aiohttp.ClientSession(
                 headers=AVITO_HTTP_HEADERS, connector=connector
             ) as own:
-                return await _run_live(own)
+                live_ads = await _run_live(own)
+                if live_ads or not (AVITO_FEED_URL or AVITO_FEED_FILE):
+                    return live_ads
+                return [
+                    NormalizedAd(ad)
+                    for ad in await fetch_feed_ads_for_key(key, own)
+                ]
         if AVITO_FEED_URL or AVITO_FEED_FILE:
             async def _run_feed(sess: aiohttp.ClientSession) -> list[NormalizedAd]:
                 ads = await fetch_feed_ads_for_key(key, sess)

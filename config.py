@@ -131,7 +131,7 @@ PRICE_DATA_RETENTION_DAYS = max(
     1, int(os.getenv("PRICE_DATA_RETENTION_DAYS", "14"))
 )
 SEEN_ADS_RETENTION_DAYS = max(1, int(os.getenv("SEEN_ADS_RETENTION_DAYS", "90")))
-KUFAR_MAX_PAGES = max(1, int(os.getenv("KUFAR_MAX_PAGES", "2")))
+KUFAR_MAX_PAGES = max(1, int(os.getenv("KUFAR_MAX_PAGES", "1")))
 IDEAL_MIN_BATTERY_PERCENT = max(1, min(100, int(os.getenv("IDEAL_MIN_BATTERY_PERCENT", "75"))))
 IDEAL_ALLOWED_CONDITIONS: tuple[str, ...] = tuple(
     normalize_label
@@ -378,7 +378,7 @@ RUB_TO_BYN = float(os.getenv("RUB_TO_BYN", "0.035"))
 RUB_TO_USD = float(os.getenv("RUB_TO_USD", "0.011"))
 
 # Avito track (Фаза 4): fetch только при AVITO_ENABLED и легальном фиде.
-_avito_enabled = os.getenv("AVITO_ENABLED", "false").strip().lower()
+_avito_enabled = os.getenv("AVITO_ENABLED", "true").strip().lower()
 AVITO_ENABLED = _avito_enabled in ("1", "true", "yes", "on")
 AVITO_CHECK_INTERVAL = max(1, int(os.getenv("AVITO_CHECK_INTERVAL", "420")))
 AVITO_VIP_CHECK_INTERVAL = max(1, int(os.getenv("AVITO_VIP_CHECK_INTERVAL", "60")))

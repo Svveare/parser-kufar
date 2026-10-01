@@ -50,8 +50,11 @@ def search_params_from_key(key: FetchKey) -> dict[str, str] | None:
     return params
 
 
-def live_search_params_from_key(key: FetchKey) -> dict[str, str] | None:
-    """GET query для https://www.avito.ru/web/1/main/items."""
+def live_search_params_for_model(
+    key: FetchKey,
+    model: str,
+) -> dict[str, str] | None:
+    """GET query для одной модели на https://www.avito.ru/web/1/main/items."""
     source, category, geo_a, geo_b, models, _memories = key
     if source != _SOURCE_AVITO or not models:
         return None
@@ -62,7 +65,7 @@ def live_search_params_from_key(key: FetchKey) -> dict[str, str] | None:
     category_id = AVITO_CATEGORY_IDS.get(cat)
     if category_id is None:
         return None
-    q = models[0].strip()
+    q = str(model or "").strip()
     if not q:
         return None
     return {
@@ -73,3 +76,10 @@ def live_search_params_from_key(key: FetchKey) -> dict[str, str] | None:
         "limit": "50",
         "presentationType": "full",
     }
+
+
+def live_search_params_from_key(key: FetchKey) -> dict[str, str] | None:
+    """Совместимый query для первой модели ключа."""
+    if not key[4]:
+        return None
+    return live_search_params_for_model(key, key[4][0])

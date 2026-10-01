@@ -42,6 +42,7 @@ from db import (
     seen_links_for,
     set_active,
     set_poll_last_run,
+    sql_metrics_snapshot,
 )
 from filters import ad_device_key, is_whole_phone_listing, matches_filters
 from filters import ideal_passes
@@ -69,6 +70,9 @@ first_run_notified: set[int] = set()
 _fetch_cache: dict[FetchKey, tuple[float, list[dict]]] = {}
 FETCH_KEY_CONCURRENCY = 3
 POLL_DUE_SLEEP_FLOOR = 1.0
+_last_description_metrics = (0.0, 0.0, 0)
+_source_failures: dict[str, int] = {}
+_source_retry_after: dict[str, float] = {}
 
 
 def _evict_stale_fetch_cache(now: float) -> None:
@@ -99,6 +103,22 @@ def _first_run_digest_msg(user: dict) -> str:
     if user_primary_source(user) == SOURCE_AVITO:
         return FIRST_RUN_DIGEST_MSG_AVITO.format(n=FIRST_RUN_LIMIT)
     return FIRST_RUN_DIGEST_MSG_KUFAR.format(n=FIRST_RUN_LIMIT)
+
+
+def _description_candidates(
+    matched: list[dict],
+    already_seen: set[str],
+    *,
+    first_run: bool,
+) -> list[dict]:
+    candidates = matched[:FIRST_RUN_LIMIT] if first_run else matched
+    return [
+        ad
+        for ad in candidates
+        if ad.get("link")
+        and ad["link"] not in already_seen
+        and not (ad.get("description") or "").strip()
+    ]
 
 
 def _ingest_market_prices_from_ads(ads: list[dict]) -> None:
@@ -187,12 +207,39 @@ def _poll_sleep_seconds(
     cap = max(0.05, cap)
     if not users:
         return cap
+    pollable_users = []
+    for user in users:
+        source = _poll_source(user)
+        if source == SOURCE_KUFAR and user_is_kufar_pollable(user):
+            pollable_users.append(user)
+        elif source == SOURCE_AVITO and user_is_avito_pollable(user):
+            pollable_users.append(user)
+    if not pollable_users:
+        return cap
     soonest = min(
-        _seconds_until_due(user, now, _poll_source(user)) for user in users
+        max(
+            _seconds_until_due(user, now, _poll_source(user)),
+            _source_retry_after.get(_poll_source(user), 0.0) - now,
+        )
+        for user in pollable_users
     )
     if soonest <= 0:
         return min(cap, POLL_DUE_SLEEP_FLOOR)
     return min(cap, soonest)
+
+
+def _due_users_by_source(users: list[dict], now: float) -> dict[str, list[dict]]:
+    due = {SOURCE_KUFAR: [], SOURCE_AVITO: []}
+    for user in users:
+        source = _poll_source(user)
+        pollable = user_is_kufar_pollable(user) if source == SOURCE_KUFAR else user_is_avito_pollable(user)
+        if (
+            pollable
+            and now >= _source_retry_after.get(source, 0.0)
+            and _should_process_user(user, now=now, source=source)
+        ):
+            due[source].append(user)
+    return due
 
 
 def _mark_user_polled(user: dict) -> None:
@@ -326,7 +373,7 @@ async def _process_user(
     *,
     matched: list[dict] | None = None,
     session: aiohttp.ClientSession | None = None,
-) -> None:
+) -> int:
     chat_id = user["chat_id"]
     is_vip = user.get("role") == "vip"
     feed_mode = (user.get("vip_feed_mode") or "normal") if is_vip else "normal"
@@ -335,9 +382,12 @@ async def _process_user(
     if matched is None:
         matched = match_ads_for_user(user, ads, market_cache)
     if not matched:
-        return
+        return 0
 
-    is_first_run = not has_seen_any(chat_id)
+    if "_poll_first_run" in user:
+        is_first_run = bool(user.pop("_poll_first_run"))
+    else:
+        is_first_run = not has_seen_any(chat_id)
     skipped_first_run = 0
     if is_first_run:
         to_send = matched[:FIRST_RUN_LIMIT]
@@ -366,20 +416,9 @@ async def _process_user(
                 already_seen.add(link)
         to_send = strict_ok
         if not to_send:
-            return
+            return 0
 
-    # Safety-net: VIP Kufar без описания — догрузить перед отправкой.
-    if is_vip and source == SOURCE_KUFAR and session is not None:
-        need_desc = [
-            ad
-            for ad in to_send
-            if ad.get("link")
-            and ad["link"] not in already_seen
-            and not (ad.get("description") or "").strip()
-        ]
-        if need_desc:
-            await enrich_ads_descriptions(need_desc, session=session, concurrency=3)
-
+    delivered_count = 0
     for ad in to_send:
         link = ad.get("link")
         if not link or link in already_seen:
@@ -416,6 +455,7 @@ async def _process_user(
             country=normalize_country(user.get("country")),
         )
         if ok:
+            delivered_count += 1
             mark_seen(chat_id, link, source=source)
             already_seen.add(link)
             increment_sent(chat_id)
@@ -444,6 +484,7 @@ async def _process_user(
             )
         except Exception as exc:
             log_exception(log, "first-run digest failed chat_id=%s: %s", chat_id, exc)
+    return delivered_count
 
 
 async def _batch_enrich_vip_descriptions(
@@ -455,8 +496,10 @@ async def _batch_enrich_vip_descriptions(
     session: aiohttp.ClientSession,
 ) -> dict[int, list[dict]]:
     """Один HTTP-проход на link для VIP; возвращает matched по chat_id."""
+    global _last_description_metrics
     matched_by_chat: dict[int, list[dict]] = {}
     by_link: dict[str, dict] = {}
+    match_seconds = 0.0
     for key, group_users in groups.items():
         if key[0] == SOURCE_AVITO:
             continue
@@ -466,7 +509,9 @@ async def _batch_enrich_vip_descriptions(
         for user in group_users:
             if user.get("role") != "vip":
                 continue
+            user_match_started = time.perf_counter()
             matched = match_ads_for_user(user, ads, market_cache)
+            match_seconds += time.perf_counter() - user_match_started
             chat_id = int(user["chat_id"])
             matched_by_chat[chat_id] = matched
             if not matched:
@@ -474,15 +519,24 @@ async def _batch_enrich_vip_descriptions(
             source = user_primary_source(user)
             links = [ad["link"] for ad in matched if ad.get("link")]
             already_seen = seen_links_for(chat_id, links, source=source)
-            for ad in matched:
-                link = ad.get("link")
-                if not link or link in already_seen:
-                    continue
-                if (ad.get("description") or "").strip():
-                    continue
+            first_run = not has_seen_any(chat_id)
+            candidates = _description_candidates(
+                matched,
+                already_seen,
+                first_run=first_run,
+            )
+            user["_poll_first_run"] = first_run
+            for ad in candidates:
+                link = ad["link"]
                 by_link.setdefault(link, ad)
+    enrich_started = time.perf_counter()
     if by_link:
         await enrich_ads_descriptions(list(by_link.values()), session=session)
+    _last_description_metrics = (
+        match_seconds,
+        time.perf_counter() - enrich_started,
+        len(by_link),
+    )
     return matched_by_chat
 
 
@@ -490,6 +544,7 @@ async def _fetch_catalog_groups(
     groups: dict[FetchKey, list[dict]],
     *,
     session: aiohttp.ClientSession,
+    fresh_keys: set[FetchKey] | None = None,
 ) -> dict[FetchKey, list[dict]]:
     keys = list(groups.keys())
     if not keys:
@@ -517,6 +572,8 @@ async def _fetch_catalog_groups(
         for key, ads in batches:
             _fetch_cache[key] = (now, ads)
             ads_by_key[key] = ads
+            if fresh_keys is not None:
+                fresh_keys.add(key)
 
     return ads_by_key
 
@@ -529,16 +586,35 @@ async def _dispatch_due(
 ) -> None:
     if not due:
         return
+    sql_metrics_snapshot(reset=True)
     src = normalize_primary_source(source)
+    group_started = time.perf_counter()
     groups = group_users_by_fetch_key(due)
+    group_seconds = time.perf_counter() - group_started
+    http_counts = {"total": 0, "catalog": 0, "description": 0}
+    fresh_keys: set[FetchKey] = set()
+
+    async def on_request_start(_session, _trace_context, params) -> None:
+        http_counts["total"] += 1
+        if "/item/" in str(params.url):
+            http_counts["description"] += 1
+        else:
+            http_counts["catalog"] += 1
+
+    trace_config = aiohttp.TraceConfig()
+    trace_config.on_request_start.append(on_request_start)
     connector = aiohttp.TCPConnector(limit=8)
     async with aiohttp.ClientSession(
-        headers=DEFAULT_HEADERS, connector=connector
+        headers=DEFAULT_HEADERS, connector=connector, trace_configs=[trace_config]
     ) as session:
-        ads_by_key = await _fetch_catalog_groups(groups, session=session)
+        fetch_started = time.perf_counter()
+        ads_by_key = await _fetch_catalog_groups(
+            groups, session=session, fresh_keys=fresh_keys
+        )
+        fetch_seconds = time.perf_counter() - fetch_started
         ingest_ads: list[dict] = []
         seen_links: set[str] = set()
-        for key in groups:
+        for key in fresh_keys:
             for ad in ads_by_key.get(key) or []:
                 link = ad.get("link")
                 if not isinstance(link, str) or not link or link in seen_links:
@@ -550,12 +626,25 @@ async def _dispatch_due(
         matched_by_chat = await _batch_enrich_vip_descriptions(
             due, groups, ads_by_key, market_cache, session=session
         )
+        match_seconds, enrich_seconds, description_candidates = _last_description_metrics
+        delivery_started = time.perf_counter()
+        sent_count = 0
         log.info(
-            "poll %s catalog ads=%d keys=%d due=%d",
+            "poll %s metrics users=%d keys=%d ads=%d http=%d catalog_http=%d "
+            "description_http=%d description_candidates=%d group_s=%.3f "
+            "fetch_s=%.3f vip_match_s=%.3f enrich_s=%.3f",
             src,
-            len(ingest_ads),
-            len(groups),
             len(due),
+            len(groups),
+            len(ingest_ads),
+            http_counts["total"],
+            http_counts["catalog"],
+            http_counts["description"],
+            description_candidates,
+            group_seconds,
+            fetch_seconds,
+            match_seconds,
+            enrich_seconds,
         )
         for key, group_users in groups.items():
             ads = ads_by_key.get(key) or []
@@ -563,19 +652,35 @@ async def _dispatch_due(
                 try:
                     chat_id = int(user["chat_id"])
                     prematched = matched_by_chat.get(chat_id)
-                    await _process_user(
+                    if prematched is None:
+                        user_match_started = time.perf_counter()
+                        prematched = match_ads_for_user(user, ads, market_cache)
+                        match_seconds += time.perf_counter() - user_match_started
+                    sent_count += await _process_user(
                         bot,
                         user,
                         ads,
                         market_cache,
-                        matched=prematched if user.get("role") == "vip" else None,
+                        matched=prematched,
                         session=session,
                     )
                     _mark_user_polled(user)
                 except Exception:
+                    _mark_user_polled(user)
                     log_exception(
                         log, "poll user failed chat_id=%s", user["chat_id"]
                     )
+        delivery_seconds = time.perf_counter() - delivery_started
+        sql_count, sql_seconds = sql_metrics_snapshot(reset=True)
+        log.info(
+            "poll %s delivery_s=%.3f match_total_s=%.3f sent=%d sql_ops=%d sql_exec_s=%.3f",
+            src,
+            delivery_seconds,
+            match_seconds,
+            sent_count,
+            sql_count,
+            sql_seconds,
+        )
 
 async def poller(bot: Bot) -> None:
     # Тяжёлые операции (expire/prune) не обязательно делать каждый цикл.
@@ -610,38 +715,43 @@ async def poller(bot: Bot) -> None:
                 await asyncio.to_thread(checkpoint_wal)
                 last_prune_at = now
 
+            users_load_started = time.perf_counter()
             users = await asyncio.to_thread(get_active_users, expire_vip=False)
+            users_load_seconds = time.perf_counter() - users_load_started
             now = time.time()
+            due_by_source = _due_users_by_source(users, now)
+            kufar_due = due_by_source[SOURCE_KUFAR]
+            avito_due = due_by_source[SOURCE_AVITO]
+            log.info(
+                "poll users active=%d load_s=%.3f kufar_due=%d avito_due=%d",
+                len(users),
+                users_load_seconds,
+                len(kufar_due),
+                len(avito_due),
+            )
 
-            def _due_for(source: str, vip: bool) -> list[dict]:
-                pollable = (
-                    user_is_kufar_pollable if source == SOURCE_KUFAR else user_is_avito_pollable
-                )
-                return [
-                    u
-                    for u in users
-                    if pollable(u)
-                    and _is_vip_user(u) == vip
-                    and _should_process_user(u, now=now, source=source)
-                ]
-
-            kufar_vip_due = _due_for(SOURCE_KUFAR, vip=True)
-            kufar_regular_due = _due_for(SOURCE_KUFAR, vip=False)
-            avito_vip_due = _due_for(SOURCE_AVITO, vip=True)
-            avito_regular_due = _due_for(SOURCE_AVITO, vip=False)
-
-            if not (
-                kufar_vip_due
-                or kufar_regular_due
-                or avito_vip_due
-                or avito_regular_due
-            ):
+            if not (kufar_due or avito_due):
                 log.debug("poll skip — no due subscribers")
             else:
-                kufar_due = kufar_vip_due + kufar_regular_due
-                avito_due = avito_vip_due + avito_regular_due
-                await _dispatch_due(bot, kufar_due, source=SOURCE_KUFAR)
-                await _dispatch_due(bot, avito_due, source=SOURCE_AVITO)
+                for source, source_due in due_by_source.items():
+                    if not source_due:
+                        continue
+                    try:
+                        await _dispatch_due(bot, source_due, source=source)
+                    except Exception:
+                        failures = _source_failures.get(source, 0) + 1
+                        _source_failures[source] = failures
+                        delay = min(30.0 * (2 ** (failures - 1)), 300.0)
+                        _source_retry_after[source] = time.time() + delay
+                        log_exception(
+                            log,
+                            "poll %s dispatch failed; retry in %.0fs",
+                            source,
+                            delay,
+                        )
+                    else:
+                        _source_failures.pop(source, None)
+                        _source_retry_after.pop(source, None)
         except Exception:
             log_exception(log, "poll cycle failed")
 

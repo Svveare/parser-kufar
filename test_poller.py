@@ -4,10 +4,27 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 
-from config import FEED_REFRESH_SECONDS, REGULAR_CHECK_INTERVAL, VIP_CHECK_INTERVAL
+from config import (
+    FEED_REFRESH_SECONDS,
+    KUFAR_MAX_PAGES,
+    REGULAR_CHECK_INTERVAL,
+    VIP_CHECK_INTERVAL,
+)
 from kufar_fetch import DEFAULT_HEADERS, enrich_ads_descriptions, _description_cache
 from marketplace.keys import FetchKey
-from poller import _fetch_catalog_groups, _fetch_cache, _poll_sleep_seconds, _seconds_until_due, _should_process_user
+from poller import (
+    _description_candidates,
+    _fetch_catalog_groups,
+    _fetch_cache,
+    _process_user,
+    _poll_sleep_seconds,
+    _due_users_by_source,
+    _seconds_until_due,
+    _should_process_user,
+    _source_failures,
+    _source_retry_after,
+)
+from marketplace.types import SOURCE_AVITO, SOURCE_KUFAR
 
 
 class PollerIntervalTests(unittest.TestCase):
@@ -59,6 +76,31 @@ class PollerIntervalTests(unittest.TestCase):
         )
         self.assertEqual(delay, 1.0)
 
+    def test_due_users_are_partitioned_by_source_once(self) -> None:
+        users = [
+            {"role": "vip", "primary_source": SOURCE_KUFAR, "poll_last_vip": 0},
+            {
+                "role": "regular",
+                "primary_source": SOURCE_KUFAR,
+                "poll_last_regular": 0,
+            },
+        ]
+        due = _due_users_by_source(users, 1_000.0)
+        self.assertEqual(len(due[SOURCE_KUFAR]), 2)
+        self.assertEqual(due[SOURCE_AVITO], [])
+
+    def test_sleep_respects_source_retry_cooldown(self) -> None:
+        user = {"role": "vip", "poll_last_vip": 0}
+        _source_retry_after[SOURCE_KUFAR] = 1_030.0
+        try:
+            self.assertEqual(_poll_sleep_seconds([user], 1_000.0), 10.0)
+        finally:
+            _source_retry_after.pop(SOURCE_KUFAR, None)
+            _source_failures.pop(SOURCE_KUFAR, None)
+
+    def test_kufar_fetch_defaults_to_one_page(self) -> None:
+        self.assertGreaterEqual(KUFAR_MAX_PAGES, 1)
+
 
 class PollerFetchCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_second_fetch_uses_cache_within_ttl(self) -> None:
@@ -84,6 +126,75 @@ class PollerFetchCacheTests(unittest.IsolatedAsyncioTestCase):
         cached = _fetch_cache.get(key)
         self.assertIsNotNone(cached)
         self.assertGreaterEqual(FEED_REFRESH_SECONDS, VIP_CHECK_INTERVAL)
+
+
+class DescriptionCandidateTests(unittest.TestCase):
+    def test_first_run_only_enriches_ads_that_will_be_sent(self) -> None:
+        ads = [
+            {"link": f"https://example.test/{number}", "description": ""}
+            for number in range(5)
+        ]
+        candidates = _description_candidates(ads, set(), first_run=True)
+        self.assertEqual(candidates, ads[:3])
+
+    def test_skips_seen_and_already_described_ads(self) -> None:
+        ads = [
+            {"link": "seen", "description": ""},
+            {"link": "cached", "description": "present"},
+            {"link": "new", "description": ""},
+        ]
+        candidates = _description_candidates(ads, {"seen"}, first_run=False)
+        self.assertEqual(candidates, [ads[2]])
+
+
+class AvitoDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_russian_user_receives_avito_listing(self) -> None:
+        user = {
+            "chat_id": 123,
+            "active": True,
+            "role": "regular",
+            "country": "ru",
+            "primary_source": SOURCE_AVITO,
+            "keywords": ["iphone 15"],
+            "memory_volumes": ["256"],
+            "product_category": "phones",
+            "max_price": 100_000,
+        }
+        ad = {
+            "title": "Apple iPhone 15 256 GB",
+            "link": "https://www.avito.ru/moskva/telefony/test-delivery",
+            "price": 75_000,
+            "source": SOURCE_AVITO,
+            "currency": "RUB",
+            "city_id": "637640",
+            "region_id": "637640",
+            "category": "phones",
+            "summary": "256 ГБ",
+            "description": "В хорошем состоянии",
+            "photo_urls": [],
+        }
+        bot = AsyncMock()
+        with patch("poller.has_seen_any", return_value=False):
+            with patch("poller.seen_links_for", return_value=set()):
+                with patch("poller._send_ad", new_callable=AsyncMock) as send:
+                    with patch("poller.mark_seen") as mark_seen:
+                        with patch("poller.increment_sent") as increment_sent:
+                            send.return_value = (True, False)
+                            delivered = await _process_user(
+                                bot,
+                                user,
+                                [ad],
+                                {},
+                                matched=[ad],
+                            )
+
+        self.assertEqual(delivered, 1)
+        send.assert_awaited_once()
+        self.assertEqual(send.await_args.kwargs["country"], "ru")
+        mark_seen.assert_called_once_with(
+            user["chat_id"], ad["link"], source=SOURCE_AVITO
+        )
+        increment_sent.assert_called_once_with(user["chat_id"])
 
 
 class DescriptionCacheTests(unittest.IsolatedAsyncioTestCase):
